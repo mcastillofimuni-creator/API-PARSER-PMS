@@ -1,74 +1,1168 @@
-import pandas as pd
+import re
+import warnings
+from datetime import datetime, date, time
+
 import openpyxl
+import pandas as pd
+from rapidfuzz import fuzz
+
+warnings.filterwarnings("ignore")
 
 
-def preparar_datos_parser(ruta_excel):
-    """
-    Parser mínimo temporal.
-    Sirve para probar que la API descarga el Excel, lo abre y guarda una validación básica.
-    Luego reemplazaremos este archivo por el parser completo.
-    """
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
 
-    wb = openpyxl.load_workbook(ruta_excel, data_only=True, read_only=True)
+HOJAS_EXCLUIR = [
+    "FORMULARIO",
+    "CLEAN",
+    "RESUMEN",
+    "INSTRUCCIONES",
+    "BD",
+    "BASE",
+    "LISTA",
+    "CONFIG",
+    "DICCIONARIO",
+    "TABLA",
+    "MAESTRA",
+]
 
-    hojas_visibles = []
+CAMPOS = {
+    "ot_grafo": [
+        "n ot", "nro ot", "ot", "grafo", "ot grafo",
+        "n°ot / grafo", "n°ot", "n° ot", "nº ot",
+        "n°ot/grafo", "n ot grafo", "orden de trabajo"
+    ],
+    "central": ["central", "planta", "sede"],
+    "unidad": ["grupo", "unidad", "grupo unidad", "unidad generadora"],
+    "sistema": ["sistema", "sist", "sistema principal"],
+    "equipo": [
+        "sub sistema/equipo",
+        "sub sistema equipo",
+        "sub sistema",
+        "subsistema",
+        "equipo",
+        "componente",
+        "activo",
+    ],
+    "cod_pm_aviso": ["cod pm / aviso", "cod pm", "aviso", "codigo pm", "código pm"],
+    "pedido": ["n pedido", "pedido", "n° pedido", "nº pedido"],
+    "motivo": [
+        "motivo",
+        "descripcion del trabajo",
+        "descripción del trabajo",
+        "trabajo",
+        "tarea",
+        "actividad",
+        "descripcion",
+        "descripción",
+    ],
+    "tipo_mant": ["tipo mant", "tipo mantenimiento", "tipo de mantenimiento"],
+    "condicion": ["condicion", "condición"],
+    "riesgo": ["riesgo critico", "riesgo crítico", "riesgo", "criticidad"],
+    "area_solicitante": ["area solicitante", "área solicitante"],
+    "inspector": ["inspector", "supervisor", "supervisor orygen", "responsable orygen"],
+    "rt_terceros": ["rt terceros", "responsable tercero", "rt", "responsable contratista", "responsable proveedor"],
+    "recursos": ["recursos", "personal", "cantidad personal"],
+    "hora_inicio": ["hora inicio", "h inicio", "inicio hora"],
+    "hora_fin": ["hora fin", "h fin", "fin hora"],
+    "dias": ["dias", "días", "dia", "día"],
+    "fecha_inicio": ["fecha inicio", "f inicio", "inicio"],
+    "fecha_fin": ["fecha fin", "f fin", "fin"],
+    "proveedor": ["empresa", "proveedor", "contratista"],
+    "codigo_actividad": ["codigo de actividad", "código de actividad"],
+    "texto_explicativo": ["texto explicativo"],
+    "riesgo_existente": ["riesgo existente"],
+    "riesgo_introducido": ["riesgo introducido"],
+    "observacion": ["observacion", "observación"],
+}
+
+
+COLUMNAS_SALIDA_ACTIVIDADES = [
+    "fila_excel",
+    "unidad",
+    "sistema",
+    "equipo",
+    "actividad",
+    "ot_grafo",
+    "tipo_mant",
+    "riesgo",
+    "inspector",
+    "rt_terceros",
+]
+
+
+COLUMNAS_SALIDA_OBSERVACIONES = [
+    "nivel",
+    "tipo_observacion",
+    "unidad",
+    "actividad",
+    "inspector_responsable",
+    "fila_excel",
+    "campo",
+    "valor_detectado",
+    "sugerencia",
+]
+
+
+# ============================================================
+# UTILIDADES
+# ============================================================
+
+def normalizar_texto(x):
+    if x is None:
+        return ""
+
+    x = str(x).strip().lower()
+    x = x.replace("\n", " ")
+    x = re.sub(r"\s+", " ", x)
+
+    reemplazos = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
+        "Á": "a", "É": "e", "Í": "i", "Ó": "o", "Ú": "u",
+        "°": "", "º": "", ".": "", ":": "", ";": "",
+        "/": " ", "\\": " ", "-": " ", "_": " ",
+    }
+
+    for a, b in reemplazos.items():
+        x = x.replace(a, b)
+
+    x = re.sub(r"\s+", " ", x)
+    return x.strip()
+
+
+def limpiar_valor(x):
+    if x is None:
+        return ""
+
+    if isinstance(x, float) and pd.isna(x):
+        return ""
+
+    if isinstance(x, datetime):
+        return x.strftime("%Y-%m-%d %H:%M")
+
+    if isinstance(x, date):
+        return x.strftime("%Y-%m-%d")
+
+    if isinstance(x, time):
+        return x.strftime("%H:%M")
+
+    x = str(x).upper().strip()
+    x = x.replace("\n", " ")
+    x = re.sub(r"\s+", " ", x)
+
+    if x in ["NAN", "NONE", "NULL"]:
+        return ""
+
+    return x
+
+
+def txt(x):
+    if x is None:
+        return ""
+    if isinstance(x, float) and pd.isna(x):
+        return ""
+    return str(x).strip()
+
+
+def txt_upper(x):
+    return limpiar_valor(x)
+
+
+def esta_vacio(x):
+    v = txt_upper(x)
+    return v in ["", "NA", "N/A", "NONE", "NAN", "NULL", "-", "--", "S/I", "SIN INFO"]
+
+
+def hoja_valida_para_programa(nombre_hoja):
+    h = limpiar_valor(nombre_hoja)
+    return not any(palabra in h for palabra in HOJAS_EXCLUIR)
+
+
+def limpiar_ot(valor):
+    if valor is None:
+        return ""
+
+    if isinstance(valor, float) and pd.isna(valor):
+        return ""
+
+    if isinstance(valor, int):
+        return str(valor)
+
+    if isinstance(valor, float):
+        if valor.is_integer():
+            return str(int(valor))
+        return str(valor).strip()
+
+    v = str(valor).strip()
+
+    if re.fullmatch(r"\d+\.0", v):
+        return v.split(".")[0]
+
+    return re.sub(r"\D", "", v)
+
+
+def convertir_a_str_seguro(valor):
+    if valor is None:
+        return ""
+
+    if isinstance(valor, float) and pd.isna(valor):
+        return ""
+
+    if isinstance(valor, datetime):
+        return valor.strftime("%Y-%m-%d %H:%M")
+
+    if isinstance(valor, date):
+        return valor.strftime("%Y-%m-%d")
+
+    if isinstance(valor, time):
+        return valor.strftime("%H:%M")
+
+    return str(valor).strip()
+
+
+# ============================================================
+# DETECCIÓN DE ENCABEZADOS
+# ============================================================
+
+def identificar_campo(texto, umbral=78):
+    texto_norm = normalizar_texto(texto)
+
+    if not texto_norm:
+        return None, 0
+
+    reglas_directas = {
+        "sub sistema equipo": "equipo",
+        "sub sistema/equipo": "equipo",
+        "subsistema": "equipo",
+        "sub sistema": "equipo",
+        "equipo": "equipo",
+        "sistema": "sistema",
+        "sist": "sistema",
+        "motivo": "motivo",
+        "actividad": "motivo",
+        "descripcion": "motivo",
+        "descripcion del trabajo": "motivo",
+        "empresa": "proveedor",
+        "proveedor": "proveedor",
+        "contratista": "proveedor",
+        "condicion": "condicion",
+        "condición": "condicion",
+        "riesgo critico": "riesgo",
+        "riesgo crítico": "riesgo",
+        "riesgo": "riesgo",
+        "inspector": "inspector",
+        "supervisor": "inspector",
+        "rt terceros": "rt_terceros",
+        "responsable tercero": "rt_terceros",
+        "hora inicio": "hora_inicio",
+        "hora fin": "hora_fin",
+        "dias": "dias",
+        "días": "dias",
+        "n ot grafo": "ot_grafo",
+        "n°ot grafo": "ot_grafo",
+        "ot grafo": "ot_grafo",
+        "ot": "ot_grafo",
+        "grafo": "ot_grafo",
+        "codigo de actividad": "codigo_actividad",
+        "código de actividad": "codigo_actividad",
+        "texto explicativo": "texto_explicativo",
+        "riesgo existente": "riesgo_existente",
+        "riesgo introducido": "riesgo_introducido",
+    }
+
+    if texto_norm in reglas_directas:
+        return reglas_directas[texto_norm], 100
+
+    mejor_campo = None
+    mejor_score = 0
+
+    for campo, sinonimos in CAMPOS.items():
+        for sinonimo in sinonimos:
+            s_norm = normalizar_texto(sinonimo)
+
+            score = max(
+                fuzz.ratio(texto_norm, s_norm),
+                fuzz.partial_ratio(texto_norm, s_norm),
+            )
+
+            if score > mejor_score:
+                mejor_score = score
+                mejor_campo = campo
+
+    if mejor_score >= umbral:
+        return mejor_campo, mejor_score
+
+    return None, mejor_score
+
+
+def detectar_encabezado_en_hoja(ws, max_filas=90, max_columnas=80, min_campos=5):
+    candidatos = []
+
+    max_row = min(ws.max_row or 1, max_filas)
+    max_col = min(ws.max_column or 1, max_columnas)
+
+    for fila_idx, fila in enumerate(
+        ws.iter_rows(
+            min_row=1,
+            max_row=max_row,
+            min_col=1,
+            max_col=max_col,
+            values_only=True,
+        ),
+        start=1,
+    ):
+        campos_detectados = {}
+
+        for col_idx, valor in enumerate(fila, start=1):
+            campo, score = identificar_campo(valor)
+
+            if campo and campo not in campos_detectados:
+                campos_detectados[campo] = {
+                    "col": col_idx,
+                    "texto": convertir_a_str_seguro(valor),
+                    "score": score,
+                }
+
+        campos_clave = {
+            "ot_grafo",
+            "central",
+            "unidad",
+            "sistema",
+            "equipo",
+            "motivo",
+            "condicion",
+            "riesgo",
+            "inspector",
+            "rt_terceros",
+        }
+
+        bonus = len(campos_clave.intersection(campos_detectados.keys()))
+        total = len(campos_detectados) + bonus
+
+        if len(campos_detectados) >= min_campos:
+            candidatos.append({
+                "fila": fila_idx,
+                "total": total,
+                "campos": campos_detectados,
+            })
+
+    if not candidatos:
+        return None
+
+    return sorted(candidatos, key=lambda x: x["total"], reverse=True)[0]
+
+
+# ============================================================
+# EXTRACCIÓN DE ACTIVIDADES
+# ============================================================
+
+def fila_tiene_datos(row_dict):
+    campos_utiles = [
+        "proveedor",
+        "ot_grafo",
+        "central",
+        "unidad",
+        "sistema",
+        "equipo",
+        "motivo",
+        "condicion",
+        "riesgo",
+        "area_solicitante",
+        "inspector",
+        "rt_terceros",
+    ]
+
+    valores_no_vacios = []
+
+    for c in campos_utiles:
+        v = row_dict.get(c, "")
+        if not esta_vacio(v):
+            valores_no_vacios.append(v)
+
+    return len(valores_no_vacios) >= 3
+
+
+def extraer_actividades(nombre_archivo):
+    wb = openpyxl.load_workbook(
+        nombre_archivo,
+        data_only=True,
+        read_only=True,
+    )
+
+    actividades = []
+    hojas_revisadas = []
+
     for nombre_hoja in wb.sheetnames:
         ws = wb[nombre_hoja]
-        estado = getattr(ws, "sheet_state", "visible")
+        estado_hoja = getattr(ws, "sheet_state", "visible")
 
-        if estado == "visible":
-            hojas_visibles.append({
+        if estado_hoja != "visible":
+            continue
+
+        if not hoja_valida_para_programa(nombre_hoja):
+            continue
+
+        det = detectar_encabezado_en_hoja(ws)
+
+        if not det:
+            continue
+
+        fila_header = det["fila"]
+        campos = det["campos"]
+
+        hojas_revisadas.append({
+            "hoja": nombre_hoja,
+            "estado": estado_hoja,
+            "fila_encabezado": fila_header,
+            "campos_detectados": ", ".join(campos.keys()),
+        })
+
+        max_filas_lectura = min(ws.max_row or fila_header, fila_header + 500)
+        max_col_lectura = min(ws.max_column or 1, 80)
+
+        for fila_idx, fila in enumerate(
+            ws.iter_rows(
+                min_row=fila_header + 1,
+                max_row=max_filas_lectura,
+                min_col=1,
+                max_col=max_col_lectura,
+                values_only=True,
+            ),
+            start=fila_header + 1,
+        ):
+            row_dict = {
                 "hoja": nombre_hoja,
-                "estado": estado,
-                "max_row": ws.max_row,
-                "max_column": ws.max_column
-            })
+                "fila_excel": fila_idx,
+            }
+
+            for campo, info in campos.items():
+                col_idx = info["col"]
+
+                if col_idx <= len(fila):
+                    row_dict[campo] = fila[col_idx - 1]
+                else:
+                    row_dict[campo] = None
+
+            if fila_tiene_datos(row_dict):
+                actividades.append(row_dict)
 
     wb.close()
 
-    actividades = []
+    df = pd.DataFrame(actividades)
+    df_hojas = pd.DataFrame(hojas_revisadas)
+
+    if df.empty:
+        return df, df_hojas
+
+    columnas_ordenadas = [
+        "hoja",
+        "fila_excel",
+        "proveedor",
+        "ot_grafo",
+        "central",
+        "unidad",
+        "sistema",
+        "equipo",
+        "motivo",
+        "tipo_mant",
+        "condicion",
+        "riesgo",
+        "area_solicitante",
+        "inspector",
+        "rt_terceros",
+        "recursos",
+        "hora_inicio",
+        "hora_fin",
+        "dias",
+        "fecha_inicio",
+        "fecha_fin",
+        "cod_pm_aviso",
+        "pedido",
+        "codigo_actividad",
+        "texto_explicativo",
+        "riesgo_existente",
+        "riesgo_introducido",
+        "observacion",
+    ]
+
+    columnas_existentes = [c for c in columnas_ordenadas if c in df.columns]
+    otras = [c for c in df.columns if c not in columnas_existentes]
+
+    return df[columnas_existentes + otras], df_hojas
+
+
+# ============================================================
+# NORMALIZACIONES
+# ============================================================
+
+def normalizar_unidad(x):
+    x = limpiar_valor(x)
+
+    if not x:
+        return ""
+
+    m = re.search(r"\bTG\s*[-]?\s*(\d+)\b", x)
+    if m:
+        return f"TG{m.group(1)}"
+
+    m = re.search(r"\bG\s*[-]?\s*(\d+)\b", x)
+    if m:
+        return f"G{m.group(1)}"
+
+    return x
+
+
+def normalizar_sistema(x):
+    x = limpiar_valor(x)
+
+    if not x:
+        return ""
+
+    if "TRAFO" in x or "TRANSFORM" in x:
+        return "TRANSFORMADOR"
+
+    if "INCENDIO" in x or "SCI" in x or "CONTRA INCENDIO" in x:
+        return "SISTEMA CONTRA INCENDIO"
+
+    if "PROTECCION" in x or "PROTECCIONES" in x or "RELÉ" in x or "RELE" in x:
+        return "PROTECCIONES"
+
+    if "EXCIT" in x or "AVR" in x:
+        return "EXCITACION / AVR"
+
+    if "UPS" in x or "BATER" in x or "CARGADOR" in x:
+        return "SERVICIOS AUXILIARES DC/AC"
+
+    if "AGUA" in x and "REFRIG" in x:
+        return "AGUA DE REFRIGERACION"
+
+    if "TURBINA" in x or "COMPRESOR" in x:
+        return "TURBINA-COMPRESOR"
+
+    if "GASODUCTO" in x:
+        return "GASODUCTO"
+
+    if "DIESEL" in x or "DIÉSEL" in x:
+        return "DIESEL"
+
+    return x
+
+
+def inferir_activo_padre(row):
+    unidad = row.get("unidad_norm", "")
+    sistema = row.get("sistema_norm", "")
+    equipo = limpiar_valor(row.get("equipo", ""))
+
+    texto = " ".join([unidad, sistema, equipo])
+
+    if "TRANSFORMADOR" in texto or "TRAFO" in texto:
+        return f"TRANSFORMADOR {unidad}".strip()
+
+    if "SISTEMA CONTRA INCENDIO" in texto or "SCI" in texto or "INCENDIO" in texto:
+        if "TRAFO" in texto or "TRANSFORM" in texto:
+            return f"TRANSFORMADOR {unidad}".strip()
+        return f"SCI {unidad}".strip()
+
+    if "PROTECCIONES" in texto:
+        return f"PROTECCIONES {unidad}".strip()
+
+    if sistema:
+        return f"{sistema} {unidad}".strip()
+
+    return unidad
+
+
+def es_fila_actividad_real(row):
+    proveedor = limpiar_valor(row.get("proveedor", ""))
+    central = limpiar_valor(row.get("central", ""))
+    unidad = limpiar_valor(row.get("unidad", ""))
+    sistema = limpiar_valor(row.get("sistema", ""))
+    equipo = limpiar_valor(row.get("equipo", ""))
+    motivo = limpiar_valor(row.get("motivo", ""))
+    condicion = limpiar_valor(row.get("condicion", ""))
+    inspector = limpiar_valor(row.get("inspector", ""))
+    rt = limpiar_valor(row.get("rt_terceros", ""))
+    ot = limpiar_valor(row.get("ot_grafo", ""))
+
+    texto_total = " ".join([
+        proveedor, central, unidad, sistema, equipo,
+        motivo, condicion, inspector, rt, ot,
+    ])
+
+    palabras_no_actividad = [
+        "TOTAL",
+        "SUBTOTAL",
+        "LEYENDA",
+        "OBSERVACION",
+        "OBSERVACIONES",
+        "SEMANA",
+        "PROGRAMA SEMANAL",
+        "NOTA",
+        "FORMULARIO",
+        "CLEAN SHEET",
+        "APROBADO",
+        "REVISADO",
+        "ELABORADO",
+    ]
+
+    if any(p in texto_total for p in palabras_no_actividad):
+        return False
+
+    campos_operativos = [
+        proveedor,
+        central,
+        unidad,
+        sistema,
+        equipo,
+        motivo,
+        condicion,
+        inspector,
+        rt,
+        ot,
+    ]
+
+    llenos = [c for c in campos_operativos if c not in ["", "NONE", "NAN", "NA", "NULL", "N/A", "-"]]
+
+    return len(llenos) >= 3
+
+
+# ============================================================
+# VALIDACIONES DE FORMA
+# ============================================================
+
+def validar_ot(valor):
+    """
+    OT válida:
+    - 8 dígitos.
+    - Debe iniciar con 100, 200 o 300.
+    Ejemplos válidos:
+    10006885
+    10011446
+    10007327
+    200xxxxx
+    300xxxxx
+
+    Ejemplos inválidos:
+    3500xxxx
+    4500xxxx
+    21xxxxxx
+    3001234 si no tiene 8 dígitos
+    """
+
+    v_limpio = limpiar_ot(valor)
+
+    if v_limpio == "":
+        return "VACIA", v_limpio
+
+    if not re.fullmatch(r"\d+", v_limpio):
+        return "INVALIDA", v_limpio
+
+    if len(v_limpio) != 8:
+        return "LONGITUD_INVALIDA", v_limpio
+
+    if re.fullmatch(r"[123]00\d{5}", v_limpio):
+        return "VALIDA", v_limpio
+
+    if v_limpio[0] not in ["1", "2", "3"]:
+        return "PRIMER_DIGITO_INVALIDO", v_limpio
+
+    if v_limpio[1:3] != "00":
+        return "PATRON_INVALIDO", v_limpio
+
+    return "INVALIDA", v_limpio
+
+
+def validar_riesgo(valor):
+    v = txt_upper(valor)
+
+    if v in ["", "NAN", "NONE", "-", "NA", "N/A"]:
+        return "VACIO_VALIDO"
+
+    if v == "X":
+        return "VALIDO"
+
+    if v in ["SI", "SÍ", "NO", "ALTO", "MEDIO", "BAJO", "CRITICO", "CRÍTICO", "CRITICAL"]:
+        return "VALOR_NO_ESTANDAR"
+
+    return "INVALIDO"
+
+
+def sistema_parece_unidad(valor):
+    v = txt_upper(valor)
+
+    if not v:
+        return False
+
+    if re.search(r"\bTG\s*-?\s*\d+\b", v):
+        return True
+
+    unidades = [
+        "VENTANILLA",
+        "SANTA ROSA",
+        "MALACAS",
+        "TG4",
+        "TG5",
+        "TG6",
+        "TG7",
+        "TG8",
+        "DISTRIBUCION",
+        "DISTRIBUCIÓN",
+    ]
+
+    return v in unidades
+
+
+def validar_condicion(valor):
+    v = txt_upper(valor)
+
+    if v == "":
+        return "VACIA"
+
+    validos = [
+        "E/S",
+        "F/S",
+        "E",
+        "S",
+        "OPERATIVO",
+        "FUERA DE SERVICIO",
+        "EN SERVICIO",
+        "CON UNIDAD EN SERVICIO",
+        "CON UNIDAD FUERA DE SERVICIO",
+    ]
+
+    if v in validos:
+        return "VALIDA"
+
+    return "NO_ESTANDAR"
+
+
+def validar_recursos(valor):
+    v = txt_upper(valor)
+
+    if v in ["", "NA", "N/A", "NONE", "NAN", "-"]:
+        return "VACIO"
+
+    try:
+        float(v)
+        return "VALIDO"
+    except Exception:
+        pass
+
+    if re.fullmatch(r"\d+\s*P\s*\d+(\.\d+)?\s*[DH]", v):
+        return "VALIDO"
+
+    return "INVALIDO"
+
+
+def agregar_obs(lista, row, campo, nivel, observacion, valor=None, sugerencia=None):
+    inspector = row.get("inspector", "")
+    rt = row.get("rt_terceros", "")
+
+    if not esta_vacio(inspector):
+        inspector_responsable = inspector
+    else:
+        inspector_responsable = rt
+
+    lista.append({
+        "proveedor": convertir_a_str_seguro(row.get("proveedor", "")),
+        "hoja": convertir_a_str_seguro(row.get("hoja", "")),
+        "fila_excel": int(row.get("fila_excel", 0) or 0),
+        "campo": campo,
+        "nivel": nivel,
+        "valor_detectado": convertir_a_str_seguro(valor if valor is not None else row.get(campo, "")),
+        "central": convertir_a_str_seguro(row.get("central", "")),
+        "unidad": convertir_a_str_seguro(row.get("unidad", "")),
+        "sistema": convertir_a_str_seguro(row.get("sistema", "")),
+        "equipo": convertir_a_str_seguro(row.get("equipo", "")),
+        "actividad": convertir_a_str_seguro(row.get("motivo", "")),
+        "inspector_responsable": convertir_a_str_seguro(inspector_responsable),
+        "tipo_observacion": observacion,
+        "sugerencia": sugerencia or "",
+    })
+
+
+def generar_observaciones_forma(df):
     observaciones = []
 
-    if not hojas_visibles:
-        observaciones.append({
-            "nivel": "ERROR",
-            "tipo_observacion": "No se encontraron hojas visibles en el archivo.",
-            "unidad": "",
-            "actividad": "",
-            "inspector_responsable": "",
-            "fila_excel": 0,
-            "campo": "hoja",
-            "valor_detectado": "",
-            "sugerencia": "Verificar que el PMS tenga al menos una hoja visible con información."
-        })
+    for _, row in df.iterrows():
+        tipo_mant = txt_upper(row.get("tipo_mant", ""))
 
-        return {
-            "actividades": actividades,
-            "observaciones": observaciones,
-            "hojas": hojas_visibles,
-            "errores": 1,
-            "advertencias": 0,
-            "estado": "ERROR - SIN HOJAS VISIBLES"
+        # Proveedor
+        if "proveedor" in df.columns and esta_vacio(row.get("proveedor", "")):
+            agregar_obs(
+                observaciones,
+                row,
+                campo="proveedor",
+                nivel="ERROR",
+                observacion="No se ha informado proveedor/empresa.",
+                valor=row.get("proveedor", ""),
+                sugerencia="Completar la columna EMPRESA o proveedor responsable.",
+            )
+
+        # OT
+        estado_ot, _ = validar_ot(row.get("ot_grafo", ""))
+
+        if estado_ot == "VACIA":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ADVERTENCIA",
+                observacion="Actividad sin OT.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="Completar la OT si ya fue generada. Debe tener 8 dígitos y cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+            )
+
+        elif estado_ot == "LONGITUD_INVALIDA":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ERROR",
+                observacion="OT con cantidad incorrecta de dígitos.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="Verificar OT. Debe tener 8 dígitos, por ejemplo 10006885.",
+            )
+
+        elif estado_ot == "PRIMER_DIGITO_INVALIDO":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ERROR",
+                observacion="OT inicia con un dígito no permitido.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="La OT debe iniciar con 1, 2 o 3 y cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+            )
+
+        elif estado_ot == "PATRON_INVALIDO":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ERROR",
+                observacion="OT no cumple el patrón esperado.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="La OT debe cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx. No debe iniciar con 350, 450, 210, etc.",
+            )
+
+        elif estado_ot == "INVALIDA":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ERROR",
+                observacion="Formato de OT no reconocido.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="Completar una OT válida de 8 dígitos con patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+            )
+
+        # Campos obligatorios operativos
+        campos_obligatorios_error = {
+            "central": "Central",
+            "unidad": "Unidad / Grupo",
+            "sistema": "Sistema",
+            "equipo": "Sub sistema/equipo",
+            "inspector": "Inspector Orygen",
+            "rt_terceros": "RT terceros",
         }
 
-    # Observación temporal para confirmar que el parser leyó el archivo.
-    observaciones.append({
-        "nivel": "ADVERTENCIA",
-        "tipo_observacion": f"Parser temporal ejecutado correctamente. Hojas visibles detectadas: {len(hojas_visibles)}.",
-        "unidad": "",
-        "actividad": "",
-        "inspector_responsable": "",
-        "fila_excel": 0,
-        "campo": "archivo",
-        "valor_detectado": str([h["hoja"] for h in hojas_visibles]),
-        "sugerencia": "Luego se reemplazará este parser temporal por el parser completo de validación PMS."
-    })
+        for campo, nombre in campos_obligatorios_error.items():
+            if campo in df.columns and esta_vacio(row.get(campo, "")):
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo=campo,
+                    nivel="ERROR",
+                    observacion=f"El campo {nombre} está vacío.",
+                    valor=row.get(campo, ""),
+                    sugerencia=f"Completar el campo {nombre}.",
+                )
+
+        # Condición
+        if "condicion" in df.columns:
+            condicion_vacia = esta_vacio(row.get("condicion", ""))
+
+            if condicion_vacia and tipo_mant == "COND":
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo="condicion",
+                    nivel="ADVERTENCIA",
+                    observacion="Actividad COND sin condición informada.",
+                    valor=row.get("condicion", ""),
+                    sugerencia="Completar la condición para actividades tipo COND. Usar valores estándar como E/S, F/S, E o S.",
+                )
+
+            elif not condicion_vacia:
+                estado_condicion = validar_condicion(row.get("condicion", ""))
+
+                if estado_condicion == "NO_ESTANDAR":
+                    agregar_obs(
+                        observaciones,
+                        row,
+                        campo="condicion",
+                        nivel="ADVERTENCIA",
+                        observacion="La condición informada no tiene un formato estándar.",
+                        valor=row.get("condicion", ""),
+                        sugerencia="Usar valores estándar como E/S, F/S, E o S, según corresponda.",
+                    )
+
+        # Sistema con posible unidad
+        if "sistema" in df.columns and sistema_parece_unidad(row.get("sistema", "")):
+            agregar_obs(
+                observaciones,
+                row,
+                campo="sistema",
+                nivel="ERROR",
+                observacion="El campo Sistema parece contener una unidad o central, no un sistema.",
+                valor=row.get("sistema", ""),
+                sugerencia="Colocar el sistema correcto: Transformador, Protecciones, Gasoducto, Agua de refrigeración, SCI, Diésel, etc.",
+            )
+
+        # Riesgo crítico
+        if "riesgo" in df.columns:
+            estado_riesgo = validar_riesgo(row.get("riesgo", ""))
+
+            if estado_riesgo == "VALOR_NO_ESTANDAR":
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo="riesgo",
+                    nivel="ADVERTENCIA",
+                    observacion="El campo Riesgo crítico tiene un valor no estándar.",
+                    valor=row.get("riesgo", ""),
+                    sugerencia="Usar solo X para marcar riesgo crítico. Dejar vacío si no aplica.",
+                )
+
+            elif estado_riesgo == "INVALIDO":
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo="riesgo",
+                    nivel="ERROR",
+                    observacion="El campo Riesgo crítico contiene un valor no válido.",
+                    valor=row.get("riesgo", ""),
+                    sugerencia="Usar solo X para riesgo crítico o dejar vacío.",
+                )
+
+        # Recursos
+        if "recursos" in df.columns:
+            estado_recursos = validar_recursos(row.get("recursos", ""))
+
+            if estado_recursos == "INVALIDO":
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo="recursos",
+                    nivel="ADVERTENCIA",
+                    observacion="El campo recursos no tiene un formato reconocido.",
+                    valor=row.get("recursos", ""),
+                    sugerencia="Usar número simple o formato tipo 4P30D, 3P8H, 2P1.5H.",
+                )
+
+    df_obs = pd.DataFrame(observaciones)
+
+    if df_obs.empty:
+        df_obs = pd.DataFrame(columns=[
+            "proveedor",
+            "hoja",
+            "fila_excel",
+            "campo",
+            "nivel",
+            "valor_detectado",
+            "central",
+            "unidad",
+            "sistema",
+            "equipo",
+            "actividad",
+            "inspector_responsable",
+            "tipo_observacion",
+            "sugerencia",
+        ])
+
+    return df_obs
+
+
+# ============================================================
+# FUNCIÓN PRINCIPAL USADA POR main.py
+# ============================================================
+
+def preparar_datos_parser(ruta_excel):
+    df_actividades, df_hojas = extraer_actividades(ruta_excel)
+
+    if df_actividades.empty:
+        return {
+            "actividades": [],
+            "observaciones": [{
+                "nivel": "ERROR",
+                "tipo_observacion": "No se detectaron actividades en el PMS.",
+                "unidad": "",
+                "actividad": "",
+                "inspector_responsable": "",
+                "fila_excel": 0,
+                "campo": "archivo",
+                "valor_detectado": "",
+                "sugerencia": "Verificar que el archivo tenga hojas visibles con encabezados reconocibles.",
+            }],
+            "hojas": df_hojas.to_dict(orient="records"),
+            "errores": 1,
+            "advertencias": 0,
+            "estado": "ERROR - SIN ACTIVIDADES DETECTADAS",
+        }
+
+    df_limpio = df_actividades.copy()
+
+    # Asegurar columnas mínimas
+    columnas_minimas = [
+        "proveedor",
+        "central",
+        "unidad",
+        "sistema",
+        "equipo",
+        "motivo",
+        "ot_grafo",
+        "tipo_mant",
+        "condicion",
+        "riesgo",
+        "inspector",
+        "rt_terceros",
+        "recursos",
+        "hora_inicio",
+        "hora_fin",
+    ]
+
+    for col in columnas_minimas:
+        if col not in df_limpio.columns:
+            df_limpio[col] = ""
+
+    # Quitar filas completamente inútiles
+    df_limpio = df_limpio.dropna(
+        subset=["central", "unidad", "sistema", "equipo", "motivo"],
+        how="all",
+    )
+
+    # Convertir valores problemáticos a string seguro para evitar errores JSON/DB
+    for col in df_limpio.columns:
+        if col not in ["fila_excel"]:
+            df_limpio[col] = df_limpio[col].apply(convertir_a_str_seguro)
+
+    # Deduplicar
+    cols_dedup = [
+        "proveedor",
+        "central",
+        "unidad",
+        "sistema",
+        "equipo",
+        "motivo",
+        "condicion",
+        "riesgo",
+        "area_solicitante",
+        "inspector",
+        "rt_terceros",
+        "hora_inicio",
+        "hora_fin",
+    ]
+
+    cols_dedup = [c for c in cols_dedup if c in df_limpio.columns]
+    if cols_dedup:
+        df_limpio = df_limpio.drop_duplicates(subset=cols_dedup)
+
+    df_base = df_limpio.copy()
+
+    df_base["unidad_norm"] = df_base["unidad"].apply(normalizar_unidad)
+    df_base["sistema_norm"] = df_base["sistema"].apply(normalizar_sistema)
+    df_base["equipo_norm"] = df_base["equipo"].apply(limpiar_valor)
+    df_base["riesgo_norm"] = df_base["riesgo"].apply(limpiar_valor)
+    df_base["activo_padre"] = df_base.apply(inferir_activo_padre, axis=1)
+
+    df_base_validable = df_base[
+        df_base.apply(es_fila_actividad_real, axis=1)
+    ].copy()
+
+    if df_base_validable.empty:
+        return {
+            "actividades": [],
+            "observaciones": [{
+                "nivel": "ERROR",
+                "tipo_observacion": "Se detectaron encabezados, pero no actividades reales validables.",
+                "unidad": "",
+                "actividad": "",
+                "inspector_responsable": "",
+                "fila_excel": 0,
+                "campo": "archivo",
+                "valor_detectado": "",
+                "sugerencia": "Verificar que el PMS tenga filas de actividades con central, unidad, sistema, equipo o motivo.",
+            }],
+            "hojas": df_hojas.to_dict(orient="records"),
+            "errores": 1,
+            "advertencias": 0,
+            "estado": "ERROR - SIN ACTIVIDADES VALIDABLES",
+        }
+
+    df_obs = generar_observaciones_forma(df_base_validable)
+
+    errores = len(df_obs[df_obs["nivel"] == "ERROR"])
+    advertencias = len(df_obs[df_obs["nivel"] == "ADVERTENCIA"])
+
+    if errores == 0 and advertencias == 0:
+        estado = "CONFORME"
+    elif errores == 0 and advertencias > 0:
+        estado = "CONFORME CON OBSERVACIONES"
+    elif errores <= 5:
+        estado = "OBSERVADO - CORRECCIÓN MENOR"
+    else:
+        estado = "OBSERVADO - REQUIERE CORRECCIÓN"
+
+    actividades = []
+
+    for _, r in df_base_validable.iterrows():
+        fila_excel = r.get("fila_excel", 0)
+        try:
+            fila_excel = int(fila_excel or 0)
+        except Exception:
+            fila_excel = 0
+
+        actividades.append({
+            "fila_excel": fila_excel,
+            "unidad": convertir_a_str_seguro(r.get("unidad", "")),
+            "sistema": convertir_a_str_seguro(r.get("sistema", "")),
+            "equipo": convertir_a_str_seguro(r.get("equipo", "")),
+            "actividad": convertir_a_str_seguro(r.get("motivo", "")),
+            "ot_grafo": convertir_a_str_seguro(r.get("ot_grafo", "")),
+            "tipo_mant": convertir_a_str_seguro(r.get("tipo_mant", "")),
+            "riesgo": convertir_a_str_seguro(r.get("riesgo", "")),
+            "inspector": convertir_a_str_seguro(r.get("inspector", "")),
+            "rt_terceros": convertir_a_str_seguro(r.get("rt_terceros", "")),
+        })
+
+    observaciones = []
+
+    for _, r in df_obs.iterrows():
+        fila_excel = r.get("fila_excel", 0)
+        try:
+            fila_excel = int(fila_excel or 0)
+        except Exception:
+            fila_excel = 0
+
+        observaciones.append({
+            "nivel": convertir_a_str_seguro(r.get("nivel", "")),
+            "tipo_observacion": convertir_a_str_seguro(r.get("tipo_observacion", "")),
+            "unidad": convertir_a_str_seguro(r.get("unidad", "")),
+            "actividad": convertir_a_str_seguro(r.get("actividad", "")),
+            "inspector_responsable": convertir_a_str_seguro(r.get("inspector_responsable", "")),
+            "fila_excel": fila_excel,
+            "campo": convertir_a_str_seguro(r.get("campo", "")),
+            "valor_detectado": convertir_a_str_seguro(r.get("valor_detectado", "")),
+            "sugerencia": convertir_a_str_seguro(r.get("sugerencia", "")),
+        })
 
     return {
         "actividades": actividades,
         "observaciones": observaciones,
-        "hojas": hojas_visibles,
-        "errores": 0,
-        "advertencias": 1,
-        "estado": "VALIDADO - PARSER TEMPORAL"
+        "hojas": df_hojas.to_dict(orient="records"),
+        "errores": int(errores),
+        "advertencias": int(advertencias),
+        "estado": estado,
     }
