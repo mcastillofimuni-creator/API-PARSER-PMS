@@ -62,7 +62,13 @@ CAMPOS = {
     "riesgo": ["riesgo critico", "riesgo crítico", "riesgo", "criticidad"],
     "area_solicitante": ["area solicitante", "área solicitante"],
     "inspector": ["inspector", "supervisor", "supervisor orygen", "responsable orygen"],
-    "rt_terceros": ["rt terceros", "responsable tercero", "rt", "responsable contratista", "responsable proveedor"],
+    "rt_terceros": [
+        "rt terceros",
+        "responsable tercero",
+        "rt",
+        "responsable contratista",
+        "responsable proveedor",
+    ],
     "recursos": ["recursos", "personal", "cantidad personal"],
     "hora_inicio": ["hora inicio", "h inicio", "inicio hora"],
     "hora_fin": ["hora fin", "h fin", "fin hora"],
@@ -76,33 +82,6 @@ CAMPOS = {
     "riesgo_introducido": ["riesgo introducido"],
     "observacion": ["observacion", "observación"],
 }
-
-
-COLUMNAS_SALIDA_ACTIVIDADES = [
-    "fila_excel",
-    "unidad",
-    "sistema",
-    "equipo",
-    "actividad",
-    "ot_grafo",
-    "tipo_mant",
-    "riesgo",
-    "inspector",
-    "rt_terceros",
-]
-
-
-COLUMNAS_SALIDA_OBSERVACIONES = [
-    "nivel",
-    "tipo_observacion",
-    "unidad",
-    "actividad",
-    "inspector_responsable",
-    "fila_excel",
-    "campo",
-    "valor_detectado",
-    "sugerencia",
-]
 
 
 # ============================================================
@@ -157,21 +136,25 @@ def limpiar_valor(x):
     return x
 
 
-def txt(x):
-    if x is None:
-        return ""
-    if isinstance(x, float) and pd.isna(x):
-        return ""
-    return str(x).strip()
-
-
 def txt_upper(x):
     return limpiar_valor(x)
 
 
 def esta_vacio(x):
     v = txt_upper(x)
-    return v in ["", "NA", "N/A", "NONE", "NAN", "NULL", "-", "--", "S/I", "SIN INFO"]
+    return v in [
+        "",
+        "NA",
+        "N/A",
+        "NONE",
+        "NAN",
+        "NULL",
+        "-",
+        "--",
+        "S/I",
+        "SIN INFO",
+        "EMPTY",
+    ]
 
 
 def hoja_valida_para_programa(nombre_hoja):
@@ -218,7 +201,12 @@ def convertir_a_str_seguro(valor):
     if isinstance(valor, time):
         return valor.strftime("%H:%M")
 
-    return str(valor).strip()
+    valor = str(valor).strip()
+
+    if valor.upper() in ["NAN", "NONE", "NULL"]:
+        return ""
+
+    return valor
 
 
 # ============================================================
@@ -243,6 +231,7 @@ def identificar_campo(texto, umbral=78):
         "actividad": "motivo",
         "descripcion": "motivo",
         "descripcion del trabajo": "motivo",
+        "descripcion trabajo": "motivo",
         "empresa": "proveedor",
         "proveedor": "proveedor",
         "contratista": "proveedor",
@@ -261,6 +250,7 @@ def identificar_campo(texto, umbral=78):
         "días": "dias",
         "n ot grafo": "ot_grafo",
         "n°ot grafo": "ot_grafo",
+        "n° ot grafo": "ot_grafo",
         "ot grafo": "ot_grafo",
         "ot": "ot_grafo",
         "grafo": "ot_grafo",
@@ -586,8 +576,16 @@ def es_fila_actividad_real(row):
     ot = limpiar_valor(row.get("ot_grafo", ""))
 
     texto_total = " ".join([
-        proveedor, central, unidad, sistema, equipo,
-        motivo, condicion, inspector, rt, ot,
+        proveedor,
+        central,
+        unidad,
+        sistema,
+        equipo,
+        motivo,
+        condicion,
+        inspector,
+        rt,
+        ot,
     ])
 
     palabras_no_actividad = [
@@ -622,7 +620,10 @@ def es_fila_actividad_real(row):
         ot,
     ]
 
-    llenos = [c for c in campos_operativos if c not in ["", "NONE", "NAN", "NA", "NULL", "N/A", "-"]]
+    llenos = [
+        c for c in campos_operativos
+        if c not in ["", "NONE", "NAN", "NA", "NULL", "N/A", "-", "EMPTY"]
+    ]
 
     return len(llenos) >= 3
 
@@ -636,18 +637,18 @@ def validar_ot(valor):
     OT válida:
     - 8 dígitos.
     - Debe iniciar con 100, 200 o 300.
+
     Ejemplos válidos:
     10006885
     10011446
     10007327
-    200xxxxx
-    300xxxxx
 
     Ejemplos inválidos:
-    3500xxxx
+    3500001867
+    3500621625
     4500xxxx
     21xxxxxx
-    3001234 si no tiene 8 dígitos
+    GE01-CTPTVE2607-SBMMCM01
     """
 
     v_limpio = limpiar_ot(valor)
@@ -676,13 +677,23 @@ def validar_ot(valor):
 def validar_riesgo(valor):
     v = txt_upper(valor)
 
-    if v in ["", "NAN", "NONE", "-", "NA", "N/A"]:
+    if v in ["", "NAN", "NONE", "-", "NA", "N/A", "EMPTY"]:
         return "VACIO_VALIDO"
 
     if v == "X":
         return "VALIDO"
 
-    if v in ["SI", "SÍ", "NO", "ALTO", "MEDIO", "BAJO", "CRITICO", "CRÍTICO", "CRITICAL"]:
+    if v in [
+        "SI",
+        "SÍ",
+        "NO",
+        "ALTO",
+        "MEDIO",
+        "BAJO",
+        "CRITICO",
+        "CRÍTICO",
+        "CRITICAL",
+    ]:
         return "VALOR_NO_ESTANDAR"
 
     return "INVALIDO"
@@ -740,7 +751,7 @@ def validar_condicion(valor):
 def validar_recursos(valor):
     v = txt_upper(valor)
 
-    if v in ["", "NA", "N/A", "NONE", "NAN", "-"]:
+    if v in ["", "NA", "N/A", "NONE", "NAN", "-", "EMPTY"]:
         return "VACIO"
 
     try:
@@ -764,13 +775,20 @@ def agregar_obs(lista, row, campo, nivel, observacion, valor=None, sugerencia=No
     else:
         inspector_responsable = rt
 
+    try:
+        fila_excel = int(row.get("fila_excel", 0) or 0)
+    except Exception:
+        fila_excel = 0
+
     lista.append({
         "proveedor": convertir_a_str_seguro(row.get("proveedor", "")),
         "hoja": convertir_a_str_seguro(row.get("hoja", "")),
-        "fila_excel": int(row.get("fila_excel", 0) or 0),
+        "fila_excel": fila_excel,
         "campo": campo,
         "nivel": nivel,
-        "valor_detectado": convertir_a_str_seguro(valor if valor is not None else row.get(campo, "")),
+        "valor_detectado": convertir_a_str_seguro(
+            valor if valor is not None else row.get(campo, "")
+        ),
         "central": convertir_a_str_seguro(row.get("central", "")),
         "unidad": convertir_a_str_seguro(row.get("unidad", "")),
         "sistema": convertir_a_str_seguro(row.get("sistema", "")),
@@ -788,19 +806,17 @@ def generar_observaciones_forma(df):
     for _, row in df.iterrows():
         tipo_mant = txt_upper(row.get("tipo_mant", ""))
 
-        # Proveedor
-        if "proveedor" in df.columns and esta_vacio(row.get("proveedor", "")):
-            agregar_obs(
-                observaciones,
-                row,
-                campo="proveedor",
-                nivel="ERROR",
-                observacion="No se ha informado proveedor/empresa.",
-                valor=row.get("proveedor", ""),
-                sugerencia="Completar la columna EMPRESA o proveedor responsable.",
-            )
+        # ============================================================
+        # PROVEEDOR
+        # ============================================================
+        # No se valida desde el Excel.
+        # El proveedor viene desde la web / tabla pms_archivos.
+        # Así evitamos falsos errores tipo "No se ha informado proveedor".
+        # ============================================================
 
+        # ============================================================
         # OT
+        # ============================================================
         estado_ot, _ = validar_ot(row.get("ot_grafo", ""))
 
         if estado_ot == "VACIA":
@@ -811,7 +827,11 @@ def generar_observaciones_forma(df):
                 nivel="ADVERTENCIA",
                 observacion="Actividad sin OT.",
                 valor=row.get("ot_grafo", ""),
-                sugerencia="Completar la OT si ya fue generada. Debe tener 8 dígitos y cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+                sugerencia=(
+                    "Completar la OT si ya fue generada. "
+                    "Debe tener 8 dígitos y cumplir el patrón "
+                    "100xxxxx, 200xxxxx o 300xxxxx."
+                ),
             )
 
         elif estado_ot == "LONGITUD_INVALIDA":
@@ -833,7 +853,10 @@ def generar_observaciones_forma(df):
                 nivel="ERROR",
                 observacion="OT inicia con un dígito no permitido.",
                 valor=row.get("ot_grafo", ""),
-                sugerencia="La OT debe iniciar con 1, 2 o 3 y cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+                sugerencia=(
+                    "La OT debe iniciar con 1, 2 o 3 y cumplir el patrón "
+                    "100xxxxx, 200xxxxx o 300xxxxx."
+                ),
             )
 
         elif estado_ot == "PATRON_INVALIDO":
@@ -844,7 +867,10 @@ def generar_observaciones_forma(df):
                 nivel="ERROR",
                 observacion="OT no cumple el patrón esperado.",
                 valor=row.get("ot_grafo", ""),
-                sugerencia="La OT debe cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx. No debe iniciar con 350, 450, 210, etc.",
+                sugerencia=(
+                    "La OT debe cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx. "
+                    "No debe iniciar con 350, 450, 210, etc."
+                ),
             )
 
         elif estado_ot == "INVALIDA":
@@ -855,13 +881,44 @@ def generar_observaciones_forma(df):
                 nivel="ERROR",
                 observacion="Formato de OT no reconocido.",
                 valor=row.get("ot_grafo", ""),
-                sugerencia="Completar una OT válida de 8 dígitos con patrón 100xxxxx, 200xxxxx o 300xxxxx.",
+                sugerencia=(
+                    "Completar una OT válida de 8 dígitos con patrón "
+                    "100xxxxx, 200xxxxx o 300xxxxx."
+                ),
             )
 
-        # Campos obligatorios operativos
+        # ============================================================
+        # CENTRAL
+        # ============================================================
+        # No se marca como error si está vacía.
+        # La central se infiere desde el nombre de hoja en preparar_datos_parser().
+        # ============================================================
+
+        # ============================================================
+        # UNIDAD
+        # ============================================================
+        # Ya no será ERROR. En actividades comunes puede no ser TG.
+        if "unidad" in df.columns and esta_vacio(row.get("unidad", "")):
+            agregar_obs(
+                observaciones,
+                row,
+                campo="unidad",
+                nivel="ADVERTENCIA",
+                observacion="El campo Unidad / Grupo está vacío.",
+                valor=row.get("unidad", ""),
+                sugerencia=(
+                    "Completar la unidad si aplica. "
+                    "Si la actividad es común o transversal, usar COMUNES PLANTA "
+                    "o el valor equivalente."
+                ),
+            )
+
+        # ============================================================
+        # CAMPOS OBLIGATORIOS TÉCNICOS
+        # ============================================================
+        # Se mantiene como error: sistema, equipo, inspector y RT terceros.
+        # Ya no se incluye proveedor ni central.
         campos_obligatorios_error = {
-            "central": "Central",
-            "unidad": "Unidad / Grupo",
             "sistema": "Sistema",
             "equipo": "Sub sistema/equipo",
             "inspector": "Inspector Orygen",
@@ -880,7 +937,9 @@ def generar_observaciones_forma(df):
                     sugerencia=f"Completar el campo {nombre}.",
                 )
 
-        # Condición
+        # ============================================================
+        # CONDICIÓN
+        # ============================================================
         if "condicion" in df.columns:
             condicion_vacia = esta_vacio(row.get("condicion", ""))
 
@@ -892,7 +951,10 @@ def generar_observaciones_forma(df):
                     nivel="ADVERTENCIA",
                     observacion="Actividad COND sin condición informada.",
                     valor=row.get("condicion", ""),
-                    sugerencia="Completar la condición para actividades tipo COND. Usar valores estándar como E/S, F/S, E o S.",
+                    sugerencia=(
+                        "Completar la condición para actividades tipo COND. "
+                        "Usar valores estándar como E/S, F/S, E o S."
+                    ),
                 )
 
             elif not condicion_vacia:
@@ -909,7 +971,9 @@ def generar_observaciones_forma(df):
                         sugerencia="Usar valores estándar como E/S, F/S, E o S, según corresponda.",
                     )
 
-        # Sistema con posible unidad
+        # ============================================================
+        # SISTEMA CON POSIBLE UNIDAD
+        # ============================================================
         if "sistema" in df.columns and sistema_parece_unidad(row.get("sistema", "")):
             agregar_obs(
                 observaciones,
@@ -918,10 +982,15 @@ def generar_observaciones_forma(df):
                 nivel="ERROR",
                 observacion="El campo Sistema parece contener una unidad o central, no un sistema.",
                 valor=row.get("sistema", ""),
-                sugerencia="Colocar el sistema correcto: Transformador, Protecciones, Gasoducto, Agua de refrigeración, SCI, Diésel, etc.",
+                sugerencia=(
+                    "Colocar el sistema correcto: Transformador, Protecciones, "
+                    "Gasoducto, Agua de refrigeración, SCI, Diésel, etc."
+                ),
             )
 
-        # Riesgo crítico
+        # ============================================================
+        # RIESGO CRÍTICO
+        # ============================================================
         if "riesgo" in df.columns:
             estado_riesgo = validar_riesgo(row.get("riesgo", ""))
 
@@ -947,7 +1016,9 @@ def generar_observaciones_forma(df):
                     sugerencia="Usar solo X para riesgo crítico o dejar vacío.",
                 )
 
-        # Recursos
+        # ============================================================
+        # RECURSOS
+        # ============================================================
         if "recursos" in df.columns:
             estado_recursos = validar_recursos(row.get("recursos", ""))
 
@@ -1014,9 +1085,12 @@ def preparar_datos_parser(ruta_excel):
 
     df_limpio = df_actividades.copy()
 
+    # ============================================================
     # Asegurar columnas mínimas
+    # ============================================================
     columnas_minimas = [
         "proveedor",
+        "hoja",
         "central",
         "unidad",
         "sistema",
@@ -1037,20 +1111,53 @@ def preparar_datos_parser(ruta_excel):
         if col not in df_limpio.columns:
             df_limpio[col] = ""
 
+    # ============================================================
+    # Inferir central desde hoja si central está vacía
+    # ============================================================
+    def inferir_central_desde_hoja(row):
+        central = row.get("central", "")
+        hoja = row.get("hoja", "")
+
+        if not esta_vacio(central):
+            return central
+
+        hoja_limpia = limpiar_valor(hoja)
+
+        if "SANTA ROSA" in hoja_limpia:
+            return "SANTA ROSA"
+
+        if "VENTANILLA" in hoja_limpia:
+            return "VENTANILLA"
+
+        if "DISTRIBUCION" in hoja_limpia or "DISTRIBUCIÓN" in hoja_limpia:
+            return "DISTRIBUCION"
+
+        if hoja_limpia:
+            return hoja_limpia
+
+        return ""
+
+    df_limpio["central"] = df_limpio.apply(inferir_central_desde_hoja, axis=1)
+
+    # ============================================================
     # Quitar filas completamente inútiles
+    # ============================================================
     df_limpio = df_limpio.dropna(
         subset=["central", "unidad", "sistema", "equipo", "motivo"],
         how="all",
     )
 
-    # Convertir valores problemáticos a string seguro para evitar errores JSON/DB
+    # ============================================================
+    # Convertir valores problemáticos a string seguro
+    # ============================================================
     for col in df_limpio.columns:
         if col not in ["fila_excel"]:
             df_limpio[col] = df_limpio[col].apply(convertir_a_str_seguro)
 
+    # ============================================================
     # Deduplicar
+    # ============================================================
     cols_dedup = [
-        "proveedor",
         "central",
         "unidad",
         "sistema",
@@ -1066,6 +1173,7 @@ def preparar_datos_parser(ruta_excel):
     ]
 
     cols_dedup = [c for c in cols_dedup if c in df_limpio.columns]
+
     if cols_dedup:
         df_limpio = df_limpio.drop_duplicates(subset=cols_dedup)
 
@@ -1101,6 +1209,9 @@ def preparar_datos_parser(ruta_excel):
             "estado": "ERROR - SIN ACTIVIDADES VALIDABLES",
         }
 
+    # ============================================================
+    # Generar observaciones
+    # ============================================================
     df_obs = generar_observaciones_forma(df_base_validable)
 
     errores = len(df_obs[df_obs["nivel"] == "ERROR"])
@@ -1115,10 +1226,14 @@ def preparar_datos_parser(ruta_excel):
     else:
         estado = "OBSERVADO - REQUIERE CORRECCIÓN"
 
+    # ============================================================
+    # Salida actividades
+    # ============================================================
     actividades = []
 
     for _, r in df_base_validable.iterrows():
         fila_excel = r.get("fila_excel", 0)
+
         try:
             fila_excel = int(fila_excel or 0)
         except Exception:
@@ -1137,10 +1252,14 @@ def preparar_datos_parser(ruta_excel):
             "rt_terceros": convertir_a_str_seguro(r.get("rt_terceros", "")),
         })
 
+    # ============================================================
+    # Salida observaciones
+    # ============================================================
     observaciones = []
 
     for _, r in df_obs.iterrows():
         fila_excel = r.get("fila_excel", 0)
+
         try:
             fila_excel = int(fila_excel or 0)
         except Exception:
