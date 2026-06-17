@@ -209,6 +209,33 @@ def convertir_a_str_seguro(valor):
     return valor
 
 
+def normalizar_central_operativa(valor):
+    """
+    Normaliza nombres de central para comparar.
+
+    Ejemplos:
+    - C. T. Santa Rosa / Santa Rosa / SANTA ROSA ANTIGUA -> SANTA ROSA
+    - C.C. Ventanilla / Ventanilla -> VENTANILLA
+    - Distribución / Distribucion -> DISTRIBUCION
+    """
+
+    v = limpiar_valor(valor)
+
+    if not v:
+        return ""
+
+    if "SANTA ROSA" in v:
+        return "SANTA ROSA"
+
+    if "VENTANILLA" in v:
+        return "VENTANILLA"
+
+    if "DISTRIBUCION" in v or "DISTRIBUCIÓN" in v:
+        return "DISTRIBUCION"
+
+    return v
+
+
 # ============================================================
 # DETECCIÓN DE ENCABEZADOS
 # ============================================================
@@ -780,6 +807,9 @@ def agregar_obs(lista, row, campo, nivel, observacion, valor=None, sugerencia=No
     except Exception:
         fila_excel = 0
 
+    central_original = convertir_a_str_seguro(row.get("central", ""))
+    central_norm = convertir_a_str_seguro(row.get("central_norm", ""))
+
     lista.append({
         "proveedor": convertir_a_str_seguro(row.get("proveedor", "")),
         "hoja": convertir_a_str_seguro(row.get("hoja", "")),
@@ -789,7 +819,8 @@ def agregar_obs(lista, row, campo, nivel, observacion, valor=None, sugerencia=No
         "valor_detectado": convertir_a_str_seguro(
             valor if valor is not None else row.get(campo, "")
         ),
-        "central": convertir_a_str_seguro(row.get("central", "")),
+        "central": central_norm or normalizar_central_operativa(central_original),
+        "central_original": central_original,
         "unidad": convertir_a_str_seguro(row.get("unidad", "")),
         "sistema": convertir_a_str_seguro(row.get("sistema", "")),
         "equipo": convertir_a_str_seguro(row.get("equipo", "")),
@@ -811,7 +842,6 @@ def generar_observaciones_forma(df):
         # ============================================================
         # No se valida desde el Excel.
         # El proveedor viene desde la web / tabla pms_archivos.
-        # Así evitamos falsos errores tipo "No se ha informado proveedor".
         # ============================================================
 
         # ============================================================
@@ -891,13 +921,12 @@ def generar_observaciones_forma(df):
         # CENTRAL
         # ============================================================
         # No se marca como error si está vacía.
-        # La central se infiere desde el nombre de hoja en preparar_datos_parser().
+        # La central se infiere desde el nombre de hoja.
         # ============================================================
 
         # ============================================================
         # UNIDAD
         # ============================================================
-        # Ya no será ERROR. En actividades comunes puede no ser TG.
         if "unidad" in df.columns and esta_vacio(row.get("unidad", "")):
             agregar_obs(
                 observaciones,
@@ -916,8 +945,6 @@ def generar_observaciones_forma(df):
         # ============================================================
         # CAMPOS OBLIGATORIOS TÉCNICOS
         # ============================================================
-        # Se mantiene como error: sistema, equipo, inspector y RT terceros.
-        # Ya no se incluye proveedor ni central.
         campos_obligatorios_error = {
             "sistema": "Sistema",
             "equipo": "Sub sistema/equipo",
@@ -1044,6 +1071,7 @@ def generar_observaciones_forma(df):
             "nivel",
             "valor_detectado",
             "central",
+            "central_original",
             "unidad",
             "sistema",
             "equipo",
@@ -1060,7 +1088,7 @@ def generar_observaciones_forma(df):
 # FUNCIÓN PRINCIPAL USADA POR main.py
 # ============================================================
 
-def preparar_datos_parser(ruta_excel):
+def preparar_datos_parser(ruta_excel, central_presentada=None):
     df_actividades, df_hojas = extraer_actividades(ruta_excel)
 
     if df_actividades.empty:
@@ -1069,6 +1097,7 @@ def preparar_datos_parser(ruta_excel):
             "observaciones": [{
                 "nivel": "ERROR",
                 "tipo_observacion": "No se detectaron actividades en el PMS.",
+                "central": "",
                 "unidad": "",
                 "actividad": "",
                 "inspector_responsable": "",
@@ -1078,6 +1107,9 @@ def preparar_datos_parser(ruta_excel):
                 "sugerencia": "Verificar que el archivo tenga hojas visibles con encabezados reconocibles.",
             }],
             "hojas": df_hojas.to_dict(orient="records"),
+            "centrales_detectadas": [],
+            "central_presentada": central_presentada or "",
+            "central_presentada_norm": normalizar_central_operativa(central_presentada),
             "errores": 1,
             "advertencias": 0,
             "estado": "ERROR - SIN ACTIVIDADES DETECTADAS",
@@ -1183,6 +1215,7 @@ def preparar_datos_parser(ruta_excel):
     df_base["sistema_norm"] = df_base["sistema"].apply(normalizar_sistema)
     df_base["equipo_norm"] = df_base["equipo"].apply(limpiar_valor)
     df_base["riesgo_norm"] = df_base["riesgo"].apply(limpiar_valor)
+    df_base["central_norm"] = df_base["central"].apply(normalizar_central_operativa)
     df_base["activo_padre"] = df_base.apply(inferir_activo_padre, axis=1)
 
     df_base_validable = df_base[
@@ -1195,6 +1228,7 @@ def preparar_datos_parser(ruta_excel):
             "observaciones": [{
                 "nivel": "ERROR",
                 "tipo_observacion": "Se detectaron encabezados, pero no actividades reales validables.",
+                "central": "",
                 "unidad": "",
                 "actividad": "",
                 "inspector_responsable": "",
@@ -1204,15 +1238,71 @@ def preparar_datos_parser(ruta_excel):
                 "sugerencia": "Verificar que el PMS tenga filas de actividades con central, unidad, sistema, equipo o motivo.",
             }],
             "hojas": df_hojas.to_dict(orient="records"),
+            "centrales_detectadas": [],
+            "central_presentada": central_presentada or "",
+            "central_presentada_norm": normalizar_central_operativa(central_presentada),
             "errores": 1,
             "advertencias": 0,
             "estado": "ERROR - SIN ACTIVIDADES VALIDABLES",
         }
 
     # ============================================================
-    # Generar observaciones
+    # Generar observaciones base
     # ============================================================
     df_obs = generar_observaciones_forma(df_base_validable)
+
+    central_declarada_norm = normalizar_central_operativa(central_presentada)
+
+    centrales_detectadas = sorted([
+        c for c in df_base_validable["central_norm"].dropna().unique().tolist()
+        if c
+    ])
+
+    # ============================================================
+    # Validar central declarada vs centrales detectadas
+    # ============================================================
+    if central_declarada_norm:
+        centrales_fuera = [
+            c for c in centrales_detectadas
+            if c and c != central_declarada_norm
+        ]
+
+        nuevas_obs_central = []
+
+        for central_fuera in centrales_fuera:
+            df_fuera = df_base_validable[
+                df_base_validable["central_norm"] == central_fuera
+            ]
+
+            cantidad_fuera = len(df_fuera)
+
+            nuevas_obs_central.append({
+                "proveedor": "",
+                "hoja": "",
+                "fila_excel": 0,
+                "campo": "central",
+                "nivel": "ADVERTENCIA",
+                "valor_detectado": central_fuera,
+                "central": central_fuera,
+                "central_original": central_fuera,
+                "unidad": "",
+                "sistema": "",
+                "equipo": "",
+                "actividad": f"Se detectaron {cantidad_fuera} actividades fuera de la central declarada.",
+                "inspector_responsable": "",
+                "tipo_observacion": "El archivo contiene actividades de una central distinta a la declarada.",
+                "sugerencia": (
+                    f"El proveedor declaró {central_presentada}, pero el archivo contiene "
+                    f"{cantidad_fuera} actividades asociadas a {central_fuera}. "
+                    "Verificar si corresponde separar el PMS por central o confirmar el alcance."
+                ),
+            })
+
+        if nuevas_obs_central:
+            df_obs = pd.concat(
+                [df_obs, pd.DataFrame(nuevas_obs_central)],
+                ignore_index=True,
+            )
 
     errores = len(df_obs[df_obs["nivel"] == "ERROR"])
     advertencias = len(df_obs[df_obs["nivel"] == "ADVERTENCIA"])
@@ -1241,6 +1331,7 @@ def preparar_datos_parser(ruta_excel):
 
         actividades.append({
             "fila_excel": fila_excel,
+            "central": convertir_a_str_seguro(r.get("central_norm", r.get("central", ""))),
             "unidad": convertir_a_str_seguro(r.get("unidad", "")),
             "sistema": convertir_a_str_seguro(r.get("sistema", "")),
             "equipo": convertir_a_str_seguro(r.get("equipo", "")),
@@ -1268,6 +1359,7 @@ def preparar_datos_parser(ruta_excel):
         observaciones.append({
             "nivel": convertir_a_str_seguro(r.get("nivel", "")),
             "tipo_observacion": convertir_a_str_seguro(r.get("tipo_observacion", "")),
+            "central": convertir_a_str_seguro(r.get("central", "")),
             "unidad": convertir_a_str_seguro(r.get("unidad", "")),
             "actividad": convertir_a_str_seguro(r.get("actividad", "")),
             "inspector_responsable": convertir_a_str_seguro(r.get("inspector_responsable", "")),
@@ -1281,6 +1373,9 @@ def preparar_datos_parser(ruta_excel):
         "actividades": actividades,
         "observaciones": observaciones,
         "hojas": df_hojas.to_dict(orient="records"),
+        "centrales_detectadas": centrales_detectadas,
+        "central_presentada": central_presentada or "",
+        "central_presentada_norm": central_declarada_norm,
         "errores": int(errores),
         "advertencias": int(advertencias),
         "estado": estado,
