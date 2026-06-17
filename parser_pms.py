@@ -662,13 +662,14 @@ def es_fila_actividad_real(row):
 def validar_ot(valor):
     """
     OT válida:
-    - 8 dígitos.
+    - 8 o 9 dígitos.
     - Debe iniciar con 100, 200 o 300.
 
     Ejemplos válidos:
-    10006885
-    10011446
-    10007327
+    10006885      -> 8 dígitos
+    100012267     -> 9 dígitos
+    20012345      -> 8 dígitos
+    300123456     -> 9 dígitos
 
     Ejemplos inválidos:
     3500001867
@@ -686,17 +687,17 @@ def validar_ot(valor):
     if not re.fullmatch(r"\d+", v_limpio):
         return "INVALIDA", v_limpio
 
-   if len(ot_limpia) not in (8, 9):
-    return "LONGITUD_INVALIDA", v_limpio
-
-    if re.fullmatch(r"[123]00\d{5}", v_limpio):
-        return "VALIDA", v_limpio
+    if len(v_limpio) not in (8, 9):
+        return "LONGITUD_INVALIDA", v_limpio
 
     if v_limpio[0] not in ["1", "2", "3"]:
         return "PRIMER_DIGITO_INVALIDO", v_limpio
 
     if v_limpio[1:3] != "00":
         return "PATRON_INVALIDO", v_limpio
+
+    if re.fullmatch(r"[123]00\d{5,6}", v_limpio):
+        return "VALIDA", v_limpio
 
     return "INVALIDA", v_limpio
 
@@ -859,20 +860,20 @@ def generar_observaciones_forma(df):
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
                     "Completar la OT si ya fue generada. "
-                    "Debe tener 8 dígitos y cumplir el patrón "
+                    "Debe tener 8 o 9 dígitos y cumplir el patrón "
                     "100xxxxx, 200xxxxx o 300xxxxx."
                 ),
             )
 
         elif estado_ot == "LONGITUD_INVALIDA":
-            agregar_obs(
-                observaciones,
-                row,
-                campo="ot_grafo",
-                nivel="ERROR",
-                observacion="OT con cantidad incorrecta de dígitos.",
-                valor=row.get("ot_grafo", ""),
-                sugerencia="Verificar OT. Debe tener 8 o 9 dígitos, por ejemplo 10006885 o 100012267.",,
+                agregar_obs(
+                    observaciones,
+                    row,
+                 campo="ot_grafo",
+                    nivel="ERROR",
+                    observacion="OT con cantidad incorrecta de dígitos.",
+                    valor=row.get("ot_grafo", ""),
+                    sugerencia="Verificar OT. Debe tener 8 o 9 dígitos, por ejemplo 10006885 o 100012267.",
             )
 
         elif estado_ot == "PRIMER_DIGITO_INVALIDO":
@@ -912,7 +913,7 @@ def generar_observaciones_forma(df):
                 observacion="Formato de OT no reconocido.",
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
-                    "Completar una OT válida de 8 dígitos con patrón "
+                    "Completar una OT válida de 8 o 9 dígitos con patrón "
                     "100xxxxx, 200xxxxx o 300xxxxx."
                 ),
             )
