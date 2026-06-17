@@ -686,8 +686,8 @@ def validar_ot(valor):
     if not re.fullmatch(r"\d+", v_limpio):
         return "INVALIDA", v_limpio
 
-    if len(v_limpio) != 8:
-        return "LONGITUD_INVALIDA", v_limpio
+   if len(ot_limpia) not in (8, 9):
+    return "LONGITUD_INVALIDA", v_limpio
 
     if re.fullmatch(r"[123]00\d{5}", v_limpio):
         return "VALIDA", v_limpio
@@ -872,7 +872,7 @@ def generar_observaciones_forma(df):
                 nivel="ERROR",
                 observacion="OT con cantidad incorrecta de dígitos.",
                 valor=row.get("ot_grafo", ""),
-                sugerencia="Verificar OT. Debe tener 8 dígitos, por ejemplo 10006885.",
+                sugerencia="Verificar OT. Debe tener 8 o 9 dígitos, por ejemplo 10006885 o 100012267.",,
             )
 
         elif estado_ot == "PRIMER_DIGITO_INVALIDO":
