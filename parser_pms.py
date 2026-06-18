@@ -983,6 +983,21 @@ def evaluar_ot_vs_aviso(ot_grafo, aviso, actividad, tipo_mant="", condicion=""):
         motivos.extend(motivos_txt[:4])
         score = max(0, min(score, 100))
 
+        # Si el aviso está informado pero la actividad parece preventiva o
+        # la sospecha es baja, no generamos observación. Evita ruido como:
+        # inspecciones / preventivos con COD PM informado y OT aún vacía.
+        if score < 45:
+            return {
+                "aplica": False,
+                "nivel": "",
+                "score": score,
+                "campo": "",
+                "valor": "",
+                "tipo_observacion": "",
+                "sugerencia": "",
+                "motivos": motivos,
+            }
+
         if score >= 70:
             return {
                 "aplica": True,
@@ -1167,6 +1182,14 @@ def inferir_condicion_cond(row):
         "no responde",
         "sin comunicacion",
         "sin comunicación",
+        "sin control",
+        "no opera",
+        "no operativo",
+        "control deshabilitado",
+        "comando deshabilitado",
+        "equipo deshabilitado",
+        "bloqueado por falla",
+        "bloqueada por falla",
         "cambio de",
         "reemplazo de",
         "desmontaje de",
@@ -1196,6 +1219,12 @@ def inferir_condicion_cond(row):
         "intervención",
         "averia",
         "avería",
+        "deshabilitado",
+        "deshabilitada",
+        "bloqueado",
+        "bloqueada",
+        "desactivado",
+        "desactivada",
         "dañado",
         "danado",
         "corregir",
