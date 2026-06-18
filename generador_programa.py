@@ -1,11 +1,13 @@
 import os
 import re
+import json
 import tempfile
 from copy import copy
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 
 PLANTILLA_NOMBRE = "PROGRAMA SEMANAL PLANTILLA.xlsx"
@@ -14,10 +16,14 @@ CENTRALES_VALIDAS = {
     "C. T. SANTA ROSA": "SANTA ROSA",
     "CT SANTA ROSA": "SANTA ROSA",
     "C.T. SANTA ROSA": "SANTA ROSA",
+    "C T SANTA ROSA": "SANTA ROSA",
     "SANTA ROSA": "SANTA ROSA",
+    "STA ROSA": "SANTA ROSA",
+
     "C.C. VENTANILLA": "VENTANILLA",
     "CC VENTANILLA": "VENTANILLA",
     "C.C VENTANILLA": "VENTANILLA",
+    "C C VENTANILLA": "VENTANILLA",
     "VENTANILLA": "VENTANILLA",
 }
 
@@ -43,31 +49,34 @@ MESES = {
 
 DIAS_CORTOS = ["SÁB", "DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE"]
 
-# Columnas principales según la plantilla compartida.
-# Ajustables si luego identificamos una columna exacta distinta.
-COLS = {
+# Rango de columnas que se copiará desde datos_originales.columnas_excel.
+# Según tu plantilla, el cuerpo relevante empieza en C y llega hasta AU.
+COL_INICIO_DATOS = "C"
+COL_FIN_DATOS = "AU"
+
+FILA_INICIO_DATOS = 10
+FILA_MODELO_ESTILO = 10
+
+# Columnas fallback si datos_originales no trae alguna columna.
+COLS_FALLBACK = {
     "ot_grafo": "C",
     "central": "D",
     "unidad": "E",
     "sistema": "F",
     "equipo": "G",
+    "cod_pm_aviso": "H",
+    "pedido": "I",
+    "tipo_mant": "K",
     "condicion": "L",
     "riesgo": "M",
+    "area_solicitante": "N",
     "inspector": "O",
     "rt_terceros": "P",
+    "recursos": "Q",
+    "hora_inicio": "R",
+    "hora_fin": "S",
     "empresa": "AD",
     "actividad": "AF",
-}
-
-# Columnas de días en la plantilla.
-DAY_COLS = {
-    0: "W",   # Sábado
-    1: "X",   # Domingo
-    2: "Y",   # Lunes
-    3: "Z",   # Martes
-    4: "AA",  # Miércoles
-    5: "AB",  # Jueves
-    6: "AC",  # Viernes
 }
 
 
@@ -113,6 +122,23 @@ def fecha_corta(fecha):
     return f"{fecha.day:02d}/{fecha.month:02d}/{fecha.year}"
 
 
+def convertir_valor_excel(valor):
+    """
+    Limpia valores antes de escribirlos en Excel.
+    Mantiene números y fechas cuando sea posible.
+    """
+    if valor is None:
+        return None
+
+    if isinstance(valor, str):
+        v = valor.strip()
+        if v.upper() in ["", "NULL", "NONE", "NAN"]:
+            return None
+        return valor
+
+    return valor
+
+
 def copiar_estilo_celda(origen, destino):
     if origen.has_style:
         destino.font = copy(origen.font)
@@ -136,91 +162,97 @@ def copiar_estilo_fila(ws, fila_origen, fila_destino, max_col):
         copiar_estilo_celda(ws.cell(fila_origen, col), ws.cell(fila_destino, col))
 
 
-def limpiar_area_datos(ws, fila_inicio=10):
+def limpiar_area_datos(ws, fila_inicio=FILA_INICIO_DATOS):
     """
-    Limpia valores de las filas de datos sin destruir formato.
+    Limpia valores del cuerpo de datos sin destruir formato.
     """
     for row in ws.iter_rows(min_row=fila_inicio, max_row=ws.max_row):
         for cell in row:
-            # No tocar encabezados, solo contenido.
             cell.value = None
 
 
 def obtener_valor(row, *keys, default=""):
     for key in keys:
-        if key in row and row.get(key) not in [None, ""]:
+        if key in row and row.get(key) not in [None, "", [], {}]:
             return row.get(key)
     return default
 
 
-def obtener_dias_actividad(row, archivo_info):
+def parse_jsonb(valor):
     """
-    Prioridad:
-    1. Si la actividad trae días propios, usar esos.
-    2. Si no, usar días del archivo/subida.
+    Supabase puede devolver jsonb como dict o string.
     """
-    dias = row.get("dias")
+    if valor is None:
+        return {}
 
-    if dias is None:
-        dias = row.get("dias_programados")
+    if isinstance(valor, dict):
+        return valor
 
-    if dias is None and archivo_info:
-        dias = archivo_info.get("dias")
+    if isinstance(valor, str):
+        try:
+            return json.loads(valor)
+        except Exception:
+            return {}
 
-    if dias is None:
-        return []
+    return {}
 
-    if isinstance(dias, list):
-        salida = []
-        for d in dias:
-            try:
-                salida.append(int(d))
-            except Exception:
-                pass
-        return sorted(set([d for d in salida if 0 <= d <= 6]))
 
-    if isinstance(dias, str):
-        # Puede venir como "[2,3]" o "2,3" o "Lun, Mar".
-        texto = dias.strip()
+def obtener_columnas_originales(actividad):
+    """
+    Lee datos_originales.columnas_excel.
+    Estructura esperada:
+    {
+      "hoja": "...",
+      "fila_excel": 10,
+      "columnas_excel": {
+        "A": "...",
+        "B": "...",
+        "C": "...",
+        ...
+      },
+      "campos_detectados": {...}
+    }
+    """
+    datos = parse_jsonb(actividad.get("datos_originales"))
 
-        if texto.startswith("[") and texto.endswith("]"):
-            texto = texto[1:-1]
+    columnas = datos.get("columnas_excel")
+    if isinstance(columnas, dict):
+        return columnas
 
-        mapa = {
-            "SAB": 0,
-            "SÁB": 0,
-            "DOM": 1,
-            "LUN": 2,
-            "MAR": 3,
-            "MIE": 4,
-            "MIÉ": 4,
-            "JUE": 5,
-            "VIE": 6,
-        }
+    return {}
 
-        salida = []
 
-        for parte in re.split(r"[,\s;/]+", texto.upper()):
-            parte = parte.strip()
-            if not parte:
-                continue
+def obtener_campos_detectados(actividad):
+    datos = parse_jsonb(actividad.get("datos_originales"))
 
-            if parte.isdigit():
-                n = int(parte)
-                if 0 <= n <= 6:
-                    salida.append(n)
+    campos = datos.get("campos_detectados")
+    if isinstance(campos, dict):
+        return campos
 
-            elif parte in mapa:
-                salida.append(mapa[parte])
+    return {}
 
-        return sorted(set(salida))
 
-    return []
+def valor_original_o_fallback(actividad, columnas_originales, letra_columna, *fallback_keys):
+    """
+    Primero intenta usar la columna original del Excel.
+    Si no existe, usa los campos planos de pms_actividades.
+    """
+    if letra_columna in columnas_originales:
+        valor = columnas_originales.get(letra_columna)
+        if valor not in [None, "", "NULL", "None", "nan"]:
+            return convertir_valor_excel(valor)
+
+    for key in fallback_keys:
+        valor = actividad.get(key)
+        if valor not in [None, "", "NULL", "None", "nan", [], {}]:
+            return convertir_valor_excel(valor)
+
+    return None
 
 
 def actualizar_encabezado_semana(ws, semana_inicio):
     """
-    Actualiza de forma robusta los textos de fechas del encabezado.
+    Actualiza de forma robusta textos de fechas del encabezado.
     No depende de una sola celda exacta.
     """
     semana_fin = semana_inicio + timedelta(days=6)
@@ -228,7 +260,6 @@ def actualizar_encabezado_semana(ws, semana_inicio):
     titulo = f"PROGRAMA SEMANAL DEL {fecha_larga(semana_inicio)} AL {fecha_larga(semana_fin)}"
     semana_texto = f"SEMANA DEL {fecha_corta(semana_inicio)} AL {fecha_corta(semana_fin)}"
 
-    # Buscar celdas de encabezado donde pueda estar el título.
     for row in ws.iter_rows(min_row=1, max_row=9):
         for cell in row:
             if isinstance(cell.value, str):
@@ -240,26 +271,32 @@ def actualizar_encabezado_semana(ws, semana_inicio):
                 if "SEMANA" in texto and ("AL" in texto or "DEL" in texto):
                     cell.value = semana_texto
 
-    # Además, escribir fechas en la zona de días W:AC.
-    # En muchas plantillas la fila 8 o 9 contiene los días/fechas.
-    for i in range(7):
+    # Buscar encabezados de días en el rango W:AC, pero sin asumir demasiado.
+    # Si la plantilla tiene esos campos, los actualizamos.
+    day_cols = ["W", "X", "Y", "Z", "AA", "AB", "AC"]
+
+    for i, col in enumerate(day_cols):
         fecha = semana_inicio + timedelta(days=i)
-        col = DAY_COLS[i]
 
-        # Fila 8: fecha.
-        ws[f"{col}8"] = fecha
-        ws[f"{col}8"].number_format = "dd/mm/yyyy"
+        try:
+            ws[f"{col}8"] = fecha
+            ws[f"{col}8"].number_format = "dd/mm/yyyy"
+        except Exception:
+            pass
 
-        # Fila 9: día corto.
-        ws[f"{col}9"] = f"{DIAS_CORTOS[i]}\n{fecha.day:02d}/{fecha.month:02d}"
+        try:
+            ws[f"{col}9"] = f"{DIAS_CORTOS[i]}\n{fecha.day:02d}/{fecha.month:02d}"
+        except Exception:
+            pass
 
 
 def consultar_archivos_semana(supabase, semana):
     resp = (
         supabase.table("pms_archivos")
         .select(
-            "id,semana,proveedor,expositor,central_presentada,archivo_nombre,"
-            "estado_validacion,errores,advertencias,actividades,observaciones,dias"
+            "id,semana,proveedor,expositor,central_presentada,central_presentada_norm,"
+            "archivo_nombre,estado_validacion,errores,advertencias,actividades,"
+            "observaciones,dias"
         )
         .eq("semana", semana)
         .execute()
@@ -272,7 +309,8 @@ def consultar_archivos_semana(supabase, semana):
 def consultar_actividades(supabase, semana, central_norm):
     """
     Consulta actividades de la semana y central.
-    Se consulta por pms_actividades.central porque el archivo puede traer varias centrales.
+    Se filtra por pms_actividades.central para consolidar únicamente
+    Santa Rosa o Ventanilla, aunque el archivo original tenga más hojas.
     """
     resp = (
         supabase.table("pms_actividades")
@@ -286,42 +324,6 @@ def consultar_actividades(supabase, semana, central_norm):
     )
 
     return resp.data or []
-
-
-def escribir_actividad(ws, fila, actividad, archivo_info):
-    proveedor = obtener_valor(
-        actividad,
-        "proveedor",
-        default=archivo_info.get("proveedor", "") if archivo_info else "",
-    )
-
-    central = obtener_valor(actividad, "central", default="")
-    unidad = obtener_valor(actividad, "unidad", "grupo", default="")
-    sistema = obtener_valor(actividad, "sistema", default="")
-    equipo = obtener_valor(actividad, "equipo", "sub_sistema", "subsistema", default="")
-    actividad_txt = obtener_valor(actividad, "actividad", "descripcion", default="")
-    ot_grafo = obtener_valor(actividad, "ot_grafo", "ot", "grafo", default="")
-    condicion = obtener_valor(actividad, "condicion", "condición", default="")
-    riesgo = obtener_valor(actividad, "riesgo", default="")
-    inspector = obtener_valor(actividad, "inspector", "inspector_responsable", default="")
-    rt_terceros = obtener_valor(actividad, "rt_terceros", "rt", default="")
-
-    ws[f"{COLS['ot_grafo']}{fila}"] = ot_grafo
-    ws[f"{COLS['central']}{fila}"] = central
-    ws[f"{COLS['unidad']}{fila}"] = unidad
-    ws[f"{COLS['sistema']}{fila}"] = sistema
-    ws[f"{COLS['equipo']}{fila}"] = equipo
-    ws[f"{COLS['condicion']}{fila}"] = condicion
-    ws[f"{COLS['riesgo']}{fila}"] = riesgo
-    ws[f"{COLS['inspector']}{fila}"] = inspector
-    ws[f"{COLS['rt_terceros']}{fila}"] = rt_terceros
-    ws[f"{COLS['empresa']}{fila}"] = proveedor
-    ws[f"{COLS['actividad']}{fila}"] = actividad_txt
-
-    dias = obtener_dias_actividad(actividad, archivo_info)
-
-    for i, col in DAY_COLS.items():
-        ws[f"{col}{fila}"] = "X" if i in dias else ""
 
 
 def seleccionar_hoja(wb, central_norm):
@@ -343,13 +345,158 @@ def seleccionar_hoja(wb, central_norm):
         if p.upper() in nombres:
             return wb[nombres[p.upper()]]
 
-    # Buscar coincidencia parcial.
     for ws in wb.worksheets:
         nombre = ws.title.upper()
         if central_norm in nombre:
             return ws
 
     return wb.active
+
+
+def dejar_solo_hoja_objetivo(wb, ws_objetivo, central_norm):
+    """
+    Deja una sola hoja para evitar duplicidades.
+    """
+    ws_objetivo.title = central_norm
+
+    for ws in list(wb.worksheets):
+        if ws.title != ws_objetivo.title:
+            wb.remove(ws)
+
+
+def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
+    """
+    Escribe una fila consolidada copiando el rango C:AU desde datos_originales.columnas_excel.
+
+    Si alguna columna no viene en el JSON, usa fallback desde pms_actividades.
+    """
+    columnas_originales = obtener_columnas_originales(actividad)
+
+    col_inicio = column_index_from_string(COL_INICIO_DATOS)
+    col_fin = column_index_from_string(COL_FIN_DATOS)
+
+    for col_idx in range(col_inicio, col_fin + 1):
+        letra = get_column_letter(col_idx)
+        valor = columnas_originales.get(letra)
+        ws.cell(row=fila_destino, column=col_idx).value = convertir_valor_excel(valor)
+
+    # Fallbacks y normalizaciones clave.
+    proveedor = obtener_valor(
+        actividad,
+        "proveedor",
+        default=archivo_info.get("proveedor", "") if archivo_info else "",
+    )
+
+    # Si AD está vacío, ponemos proveedor.
+    col_empresa = COLS_FALLBACK["empresa"]
+    if ws[f"{col_empresa}{fila_destino}"].value in [None, ""]:
+        ws[f"{col_empresa}{fila_destino}"] = proveedor
+
+    # Forzar central normalizada en D para que el consolidado quede limpio.
+    ws[f"{COLS_FALLBACK['central']}{fila_destino}"] = obtener_valor(
+        actividad,
+        "central",
+        default=normalizar_central(archivo_info.get("central_presentada", "")) if archivo_info else "",
+    )
+
+    # Si alguna columna principal vino vacía, rellenar con campos planos.
+    ws[f"{COLS_FALLBACK['ot_grafo']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["ot_grafo"],
+        "ot_grafo",
+    )
+
+    ws[f"{COLS_FALLBACK['unidad']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["unidad"],
+        "unidad",
+    )
+
+    ws[f"{COLS_FALLBACK['sistema']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["sistema"],
+        "sistema",
+    )
+
+    ws[f"{COLS_FALLBACK['equipo']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["equipo"],
+        "equipo",
+    )
+
+    ws[f"{COLS_FALLBACK['tipo_mant']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["tipo_mant"],
+        "tipo_mant",
+    )
+
+    ws[f"{COLS_FALLBACK['condicion']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["condicion"],
+        "condicion",
+    )
+
+    ws[f"{COLS_FALLBACK['riesgo']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["riesgo"],
+        "riesgo",
+    )
+
+    ws[f"{COLS_FALLBACK['inspector']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["inspector"],
+        "inspector",
+        "inspector_responsable",
+    )
+
+    ws[f"{COLS_FALLBACK['rt_terceros']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["rt_terceros"],
+        "rt_terceros",
+    )
+
+    ws[f"{COLS_FALLBACK['actividad']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["actividad"],
+        "actividad",
+        "motivo",
+    )
+
+
+def preparar_filas_destino(ws, total_actividades):
+    """
+    Prepara suficientes filas copiando el estilo de la fila modelo.
+    No borra encabezados.
+    """
+    max_col = max(ws.max_column, column_index_from_string(COL_FIN_DATOS))
+
+    if total_actividades <= 0:
+        total_actividades = 1
+
+    # Limpiar valores existentes.
+    limpiar_area_datos(ws, fila_inicio=FILA_INICIO_DATOS)
+
+    # Insertar filas si la plantilla no tiene suficientes.
+    filas_actuales_desde_inicio = max(ws.max_row - FILA_INICIO_DATOS + 1, 1)
+
+    if total_actividades > filas_actuales_desde_inicio:
+        filas_extra = total_actividades - filas_actuales_desde_inicio
+        ws.insert_rows(ws.max_row + 1, amount=filas_extra)
+
+    # Copiar estilo de fila modelo a todas las filas destino.
+    for idx in range(total_actividades):
+        fila = FILA_INICIO_DATOS + idx
+        copiar_estilo_fila(ws, FILA_MODELO_ESTILO, fila, max_col)
 
 
 def nombre_archivo_salida(semana, central_norm):
@@ -367,21 +514,11 @@ def generar_programa_unico(
     """
     Genera el Excel consolidado manteniendo la plantilla.
 
-    Parámetros:
-    - supabase: cliente Supabase ya inicializado.
-    - semana: texto YYYY-MM-DD. Ejemplo: 2026-06-13.
-    - central: "SANTA ROSA", "VENTANILLA", "C. T. Santa Rosa" o "C.C. Ventanilla".
-    - salida_path: ruta opcional donde guardar el archivo.
-    - plantilla_path: ruta opcional de la plantilla.
-
-    Retorna:
-    {
-      "ok": True,
-      "archivo_generado": "...",
-      "total_actividades": 38,
-      "central": "SANTA ROSA",
-      "semana": "2026-06-13"
-    }
+    Nuevo comportamiento:
+    - Usa datos_originales.columnas_excel como fuente principal.
+    - Copia C:AU desde cada fila original al Excel consolidado.
+    - Mantiene formato de la plantilla destino.
+    - Filtra por semana y central.
     """
 
     semana_inicio = parse_semana_inicio(semana)
@@ -407,39 +544,23 @@ def generar_programa_unico(
     wb = load_workbook(plantilla_path)
     ws = seleccionar_hoja(wb, central_norm)
 
+    dejar_solo_hoja_objetivo(wb, ws, central_norm)
     actualizar_encabezado_semana(ws, semana_inicio)
 
-    fila_inicio = 10
-    fila_base_estilo = 10
-    max_col = ws.max_column
+    preparar_filas_destino(ws, len(actividades))
 
-    limpiar_area_datos(ws, fila_inicio=fila_inicio)
-
-    # Si hay más actividades que filas disponibles en la plantilla, insertar filas.
-    filas_disponibles = max(ws.max_row - fila_inicio + 1, 1)
-    if len(actividades) > filas_disponibles:
-        filas_extra = len(actividades) - filas_disponibles
-        ws.insert_rows(ws.max_row + 1, amount=filas_extra)
-
-    # Copiar estilo de la fila base a las filas que se usarán.
-    for idx in range(len(actividades)):
-        fila = fila_inicio + idx
-        copiar_estilo_fila(ws, fila_base_estilo, fila, max_col)
-
-    # Escribir actividades consolidadas.
     for idx, actividad in enumerate(actividades):
-        fila = fila_inicio + idx
+        fila = FILA_INICIO_DATOS + idx
         archivo_id = actividad.get("pms_archivo_id")
         archivo_info = archivos_map.get(archivo_id, {})
-        escribir_actividad(ws, fila, actividad, archivo_info)
+        escribir_fila_desde_original(ws, fila, actividad, archivo_info)
 
-    # Si no hay actividades, dejar una nota en la primera fila.
     if not actividades:
-        ws[f"{COLS['actividad']}{fila_inicio}"] = (
+        ws[f"{COLS_FALLBACK['actividad']}{FILA_INICIO_DATOS}"] = (
             f"No hay actividades registradas para {CENTRAL_LABEL[central_norm]} en la semana {semana}."
         )
+        ws[f"{COLS_FALLBACK['central']}{FILA_INICIO_DATOS}"] = central_norm
 
-    # Guardar archivo.
     if salida_path is None:
         tmp_dir = tempfile.mkdtemp(prefix="programa_unico_")
         salida_path = Path(tmp_dir) / nombre_archivo_salida(semana, central_norm)
