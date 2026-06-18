@@ -86,6 +86,90 @@ CAMPOS = {
 
 
 # ============================================================
+# DICCIONARIO INTELIGENTE OT VS AVISO
+# ============================================================
+# Estos pesos no bloquean por sí solos. Generan un score de sospecha
+# para advertir cuando un número informado como OT podría ser un Aviso SAP.
+
+AVISO_RANGO_100_MIN = 10000030
+AVISO_RANGO_100_MAX = 10002533
+
+PALABRAS_AVISO_ALTA = {
+    "falla": 25,
+    "fallo": 25,
+    "inoperativo": 25,
+    "alarma": 22,
+    "fuga": 25,
+    "rotura": 22,
+    "perdida": 20,
+    "bajo": 18,
+    "baja": 18,
+    "alto": 18,
+    "alta": 18,
+    "nivel": 16,
+    "presion": 18,
+    "temperatura": 18,
+    "desgaste": 20,
+    "filtracion": 20,
+    "pase": 18,
+    "trip": 20,
+    "ruido": 18,
+    "corrosion": 18,
+    "senal": 18,
+    "sensor": 14,
+    "error": 18,
+    "anormal": 16,
+    "intermitente": 16,
+    "comunicacion": 14,
+    "averia": 22,
+    "defecto": 18,
+    "dañado": 18,
+    "danado": 18,
+}
+
+FRASES_AVISO_ALTA = {
+    "fuga aceite": 30,
+    "fuga de aceite": 30,
+    "fuga agua": 28,
+    "fuga de agua": 28,
+    "fuga aire": 26,
+    "fuga de aire": 26,
+    "baja presion": 28,
+    "bajo nivel": 28,
+    "alarma bajo": 26,
+    "senal alarma": 25,
+    "senal falla": 28,
+    "falla sensor": 25,
+    "desgaste interno": 24,
+    "desgaste bomba": 24,
+    "pase valvula": 22,
+    "perdida comunicacion": 24,
+    "no comunica": 22,
+    "no responde": 22,
+    "fuera de servicio": 18,
+}
+
+PALABRAS_PREVENTIVO = {
+    "mantto": -22,
+    "manto": -22,
+    "mantenimiento": -18,
+    "preventivo": -24,
+    "prev": -20,
+    "calibracion": -24,
+    "instrumentacion": -18,
+    "prueba": -12,
+    "pruebas": -12,
+    "anual": -16,
+    "limpieza": -14,
+    "inspeccion": -10,
+    "analisis": -10,
+    "aceite": -8,
+    "reconfig": -18,
+    "sustitucion": -14,
+}
+
+
+# ============================================================
 # UTILIDADES
 # ============================================================
 
@@ -751,7 +835,10 @@ def validar_ot(valor):
     """
     OT válida:
     - 8 o 9 dígitos.
-    - Debe iniciar con 100, 200 o 300.
+    - Debe iniciar con 100, 200, 300 o 400.
+
+    Nota: los números 100 bajos pueden parecer Avisos SAP; eso se evalúa
+    después con evaluar_ot_vs_aviso(), sin bloquear automáticamente.
     """
 
     v_limpio = limpiar_ot(valor)
@@ -765,16 +852,244 @@ def validar_ot(valor):
     if len(v_limpio) not in (8, 9):
         return "LONGITUD_INVALIDA", v_limpio
 
-    if v_limpio[0] not in ["1", "2", "3"]:
+    if v_limpio[0] not in ["1", "2", "3", "4"]:
         return "PRIMER_DIGITO_INVALIDO", v_limpio
 
     if v_limpio[1:3] != "00":
         return "PATRON_INVALIDO", v_limpio
 
-    if re.fullmatch(r"[123]00\d{5,6}", v_limpio):
+    if re.fullmatch(r"[1234]00\d{5,6}", v_limpio):
         return "VALIDA", v_limpio
 
     return "INVALIDA", v_limpio
+
+
+def score_texto_aviso(texto):
+    """
+    Evalúa si la descripción parece correctiva/aviso o preventiva.
+    Devuelve score y motivos. Score positivo = más sospecha de Aviso.
+    """
+    texto_norm = normalizar_texto(texto)
+    score = 0
+    motivos = []
+
+    if not texto_norm:
+        return 0, motivos
+
+    tokens = set(texto_norm.split())
+
+    for frase, peso in FRASES_AVISO_ALTA.items():
+        frase_norm = normalizar_texto(frase)
+        if frase_norm and frase_norm in texto_norm:
+            score += peso
+            motivos.append(f"frase correctiva: {frase}")
+
+    for palabra, peso in PALABRAS_AVISO_ALTA.items():
+        palabra_norm = normalizar_texto(palabra)
+        if palabra_norm in tokens:
+            score += peso
+            motivos.append(f"palabra correctiva: {palabra}")
+
+    for palabra, peso in PALABRAS_PREVENTIVO.items():
+        palabra_norm = normalizar_texto(palabra)
+        if palabra_norm and palabra_norm in texto_norm:
+            score += peso
+            motivos.append(f"patrón preventivo: {palabra}")
+
+    return score, motivos
+
+
+def score_numero_ot_vs_aviso(valor_ot):
+    """
+    Evalúa el número colocado en OT/Grafo usando patrón histórico.
+    Score positivo = más sospecha de Aviso colocado como OT.
+    """
+    n = limpiar_ot(valor_ot)
+
+    if not n:
+        return 0, "OT vacía."
+
+    if not n.isdigit():
+        return 80, "OT contiene caracteres no numéricos."
+
+    if len(n) not in (8, 9):
+        return 80, "OT no tiene 8 o 9 dígitos."
+
+    # En el histórico, 300 y 400 son casi siempre OT.
+    if n.startswith(("300", "400")):
+        return -25, "Número con patrón muy probable de OT."
+
+    # 200 suele ser OT, aunque hay pocos avisos 200.
+    if n.startswith("200"):
+        return 5, "Número con patrón probable de OT."
+
+    # Zona de mayor confusión: números 100 bajos.
+    if n.startswith("100"):
+        try:
+            num = int(n)
+
+            if len(n) == 8 and AVISO_RANGO_100_MIN <= num <= AVISO_RANGO_100_MAX:
+                return 35, "Número dentro del rango típico de Avisos SAP."
+
+            if num > AVISO_RANGO_100_MAX:
+                return -15, "Número 100 fuera del rango típico de Avisos SAP."
+        except Exception:
+            pass
+
+    if not n.startswith(("100", "200", "300", "400")):
+        return 70, "Número no inicia con patrón típico de OT."
+
+    return 0, "Patrón numérico neutro."
+
+
+def evaluar_ot_vs_aviso(ot_grafo, aviso, actividad, tipo_mant="", condicion=""):
+    """
+    Detecta probable Aviso colocado como OT o Aviso informado sin OT.
+
+    No usa tabla maestra SAP; usa score por:
+    - patrón numérico,
+    - texto correctivo/preventivo,
+    - posición del dato: OT vacía / Aviso lleno.
+
+    Devuelve dict con aplica/nivel/tipo/sugerencia.
+    """
+    ot = limpiar_ot(ot_grafo)
+    av = limpiar_ot(aviso)
+    texto = f"{actividad or ''} {tipo_mant or ''} {condicion or ''}"
+
+    score_txt, motivos_txt = score_texto_aviso(texto)
+    motivos = []
+
+    # Caso crítico: el proveedor informó Aviso/COD PM, pero dejó OT vacía.
+    if not ot and av:
+        score = 45
+        motivos.append("Aviso/COD PM informado con OT vacía")
+
+        if av.isdigit() and len(av) in (8, 9) and av.startswith("100"):
+            try:
+                av_num = int(av)
+                if len(av) == 8 and AVISO_RANGO_100_MIN <= av_num <= AVISO_RANGO_100_MAX:
+                    score += 20
+                    motivos.append("Aviso dentro del rango típico de Avisos SAP")
+            except Exception:
+                pass
+
+        score += score_txt
+        motivos.extend(motivos_txt[:4])
+        score = max(0, min(score, 100))
+
+        if score >= 70:
+            return {
+                "aplica": True,
+                "nivel": "ADVERTENCIA",
+                "score": score,
+                "campo": "cod_pm_aviso",
+                "valor": av,
+                "tipo_observacion": "Probable aviso correctivo informado sin OT asociada.",
+                "sugerencia": (
+                    "Se informó un Aviso/COD PM, pero la OT está vacía. "
+                    "La descripción tiene patrón correctivo. Verificar en SAP si el aviso ya tiene una OT asociada; "
+                    "si existe, completar el campo OT/Grafo."
+                ),
+                "motivos": motivos,
+            }
+
+        return {
+            "aplica": True,
+            "nivel": "ADVERTENCIA",
+            "score": score,
+            "campo": "cod_pm_aviso",
+            "valor": av,
+            "tipo_observacion": "Aviso/COD PM informado sin OT asociada.",
+            "sugerencia": (
+                "Se informó Aviso/COD PM, pero el campo OT/Grafo está vacío. "
+                "Verificar en SAP si el aviso ya tiene una OT asociada."
+            ),
+            "motivos": motivos,
+        }
+
+    # Si OT y Aviso son iguales, es sospechoso aunque el número tenga formato correcto.
+    if ot and av and ot == av:
+        return {
+            "aplica": True,
+            "nivel": "ADVERTENCIA",
+            "score": 75,
+            "campo": "ot_grafo",
+            "valor": ot,
+            "tipo_observacion": "Mismo número informado como OT y Aviso/COD PM.",
+            "sugerencia": (
+                "El mismo número aparece en OT/Grafo y en Aviso/COD PM. "
+                "Verificar en SAP cuál corresponde realmente a la OT y cuál al aviso."
+            ),
+            "motivos": ["OT y Aviso/COD PM tienen el mismo valor"],
+        }
+
+    # Caso OT llena: evaluar si parece aviso.
+    if ot:
+        score_num, motivo_num = score_numero_ot_vs_aviso(ot)
+        score = score_num + score_txt
+        motivos.append(motivo_num)
+        motivos.extend(motivos_txt[:4])
+
+        tipo_norm = normalizar_texto(tipo_mant)
+        condicion_norm = normalizar_texto(condicion)
+        texto_norm = normalizar_texto(texto)
+
+        if any(p in tipo_norm for p in ["cond", "correct", "corr"]):
+            score += 10
+            motivos.append("Tipo de mantenimiento correctivo/condicional")
+
+        if any(p in tipo_norm for p in ["prev", "mantto", "manto", "mantenimiento"]):
+            score -= 12
+            motivos.append("Tipo de mantenimiento con patrón preventivo")
+
+        # Si dice correctivo o condición de falla, sube ligeramente.
+        if any(p in texto_norm for p in ["correctivo", "condicional", "emergencia"]):
+            score += 10
+            motivos.append("Texto sugiere atención correctiva/condicional")
+
+        score = max(0, min(score, 100))
+
+        if score >= 70:
+            return {
+                "aplica": True,
+                "nivel": "ADVERTENCIA",
+                "score": score,
+                "campo": "ot_grafo",
+                "valor": ot,
+                "tipo_observacion": "Alta probabilidad de Aviso colocado en campo OT.",
+                "sugerencia": (
+                    "El número tiene patrón similar a Aviso SAP y la descripción parece correctiva. "
+                    "Verificar en SAP si corresponde a Aviso o a OT. Si es Aviso, reemplazar por la OT asociada."
+                ),
+                "motivos": motivos,
+            }
+
+        if score >= 40:
+            return {
+                "aplica": True,
+                "nivel": "ADVERTENCIA",
+                "score": score,
+                "campo": "ot_grafo",
+                "valor": ot,
+                "tipo_observacion": "Número OT con patrón similar a Aviso SAP.",
+                "sugerencia": (
+                    "El número informado como OT cae en una zona típica de Avisos SAP. "
+                    "Validar si corresponde realmente a OT/Grafo o si debe reemplazarse por la OT asociada."
+                ),
+                "motivos": motivos,
+            }
+
+    return {
+        "aplica": False,
+        "nivel": "",
+        "score": 0,
+        "campo": "",
+        "valor": "",
+        "tipo_observacion": "",
+        "sugerencia": "",
+        "motivos": [],
+    }
 
 
 def validar_riesgo(valor):
@@ -919,19 +1234,24 @@ def generar_observaciones_forma(df):
         estado_ot, _ = validar_ot(row.get("ot_grafo", ""))
 
         if estado_ot == "VACIA":
-            agregar_obs(
-                observaciones,
-                row,
-                campo="ot_grafo",
-                nivel="ADVERTENCIA",
-                observacion="Actividad sin OT.",
-                valor=row.get("ot_grafo", ""),
-                sugerencia=(
-                    "Completar la OT si ya fue generada. "
-                    "Debe tener 8 o 9 dígitos y cumplir el patrón "
-                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
-                ),
-            )
+            # Si existe Aviso/COD PM, se agregará una observación más específica
+            # con evaluar_ot_vs_aviso(). Evitamos duplicar "Actividad sin OT".
+            aviso_informado = not esta_vacio(row.get("cod_pm_aviso", ""))
+
+            if not aviso_informado:
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo="ot_grafo",
+                    nivel="ADVERTENCIA",
+                    observacion="Actividad sin OT.",
+                    valor=row.get("ot_grafo", ""),
+                    sugerencia=(
+                        "Completar la OT si ya fue generada. "
+                        "Debe tener 8 o 9 dígitos y cumplir el patrón "
+                        "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx, 300xxxxxx, 400xxxxx o 400xxxxxx."
+                    ),
+                )
 
         elif estado_ot == "LONGITUD_INVALIDA":
             agregar_obs(
@@ -953,8 +1273,8 @@ def generar_observaciones_forma(df):
                 observacion="OT inicia con un dígito no permitido.",
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
-                    "La OT debe iniciar con 1, 2 o 3 y cumplir el patrón "
-                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
+                    "La OT debe iniciar con 1, 2, 3 o 4 y cumplir el patrón "
+                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx, 300xxxxxx, 400xxxxx o 400xxxxxx."
                 ),
             )
 
@@ -983,9 +1303,41 @@ def generar_observaciones_forma(df):
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
                     "Completar una OT válida de 8 o 9 dígitos con patrón "
-                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
+                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx, 300xxxxxx, 400xxxxx o 400xxxxxx."
                 ),
             )
+
+        # ============================================================
+        # OT VS AVISO SAP - VALIDACIÓN INTELIGENTE
+        # ============================================================
+        # Se ejecuta solo cuando la OT está vacía o tiene formato válido.
+        # Si la OT ya tiene error de formato, no duplicamos observaciones.
+        if estado_ot in ["VACIA", "VALIDA"]:
+            obs_ot_aviso = evaluar_ot_vs_aviso(
+                ot_grafo=row.get("ot_grafo", ""),
+                aviso=row.get("cod_pm_aviso", ""),
+                actividad=row.get("motivo", ""),
+                tipo_mant=row.get("tipo_mant", ""),
+                condicion=row.get("condicion", ""),
+            )
+
+            if obs_ot_aviso.get("aplica"):
+                motivos = obs_ot_aviso.get("motivos") or []
+                score = obs_ot_aviso.get("score", 0)
+
+                detalle_score = f" Score de sospecha: {score}/100."
+                if motivos:
+                    detalle_score += " Motivos: " + "; ".join(motivos[:3]) + "."
+
+                agregar_obs(
+                    observaciones,
+                    row,
+                    campo=obs_ot_aviso.get("campo") or "ot_grafo",
+                    nivel=obs_ot_aviso.get("nivel") or "ADVERTENCIA",
+                    observacion=obs_ot_aviso.get("tipo_observacion") or "Posible confusión entre OT y Aviso SAP.",
+                    valor=obs_ot_aviso.get("valor") or row.get("ot_grafo", "") or row.get("cod_pm_aviso", ""),
+                    sugerencia=(obs_ot_aviso.get("sugerencia") or "Validar OT/Aviso en SAP.") + detalle_score,
+                )
 
         # ============================================================
         # UNIDAD
@@ -1231,6 +1583,7 @@ def preparar_datos_parser(
         "recursos",
         "hora_inicio",
         "hora_fin",
+        "cod_pm_aviso",
         "datos_originales",
     ]
 
