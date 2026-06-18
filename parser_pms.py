@@ -1,6 +1,7 @@
 import re
 import warnings
 from datetime import datetime, date, time
+from openpyxl.utils import get_column_letter
 
 import openpyxl
 import pandas as pd
@@ -209,14 +210,37 @@ def convertir_a_str_seguro(valor):
     return valor
 
 
+def json_seguro(valor):
+    """
+    Convierte valores de Excel/Pandas/OpenPyXL en JSON seguro para Supabase.
+    """
+    if valor is None:
+        return None
+
+    if isinstance(valor, float) and pd.isna(valor):
+        return None
+
+    if isinstance(valor, (datetime, date, time)):
+        return convertir_a_str_seguro(valor)
+
+    if isinstance(valor, dict):
+        return {str(k): json_seguro(v) for k, v in valor.items()}
+
+    if isinstance(valor, list):
+        return [json_seguro(v) for v in valor]
+
+    if isinstance(valor, tuple):
+        return [json_seguro(v) for v in valor]
+
+    if isinstance(valor, (str, int, float, bool)):
+        return valor
+
+    return str(valor)
+
+
 def normalizar_central_operativa(valor):
     """
     Normaliza nombres de central para comparar.
-
-    Ejemplos:
-    - C. T. Santa Rosa / Santa Rosa / SANTA ROSA ANTIGUA -> SANTA ROSA
-    - C.C. Ventanilla / Ventanilla -> VENTANILLA
-    - Distribución / Distribucion -> DISTRIBUCION
     """
 
     v = limpiar_valor(valor)
@@ -234,6 +258,18 @@ def normalizar_central_operativa(valor):
         return "DISTRIBUCION"
 
     return v
+
+
+def obtener_central_presentada_desde_archivo_info(archivo_info):
+    if not isinstance(archivo_info, dict):
+        return ""
+
+    return (
+        archivo_info.get("central_presentada")
+        or archivo_info.get("central")
+        or archivo_info.get("central_presentada_norm")
+        or ""
+    )
 
 
 # ============================================================
@@ -400,6 +436,50 @@ def fila_tiene_datos(row_dict):
     return len(valores_no_vacios) >= 3
 
 
+def construir_datos_originales(nombre_hoja, fila_excel, fila, campos):
+    """
+    Guarda la fila completa original para luego reconstruir el Excel consolidado.
+
+    Incluye:
+    - columnas_excel: valores por letra de columna A, B, C...
+    - campos_detectados: valores según los encabezados detectados
+    - mapa_campos: columna detectada para cada campo
+    """
+    columnas_excel = {}
+
+    for idx, valor in enumerate(fila, start=1):
+        letra = get_column_letter(idx)
+        columnas_excel[letra] = json_seguro(valor)
+
+    campos_detectados = {}
+
+    for campo, info in campos.items():
+        col_idx = info["col"]
+
+        if col_idx <= len(fila):
+            campos_detectados[campo] = json_seguro(fila[col_idx - 1])
+        else:
+            campos_detectados[campo] = None
+
+    mapa_campos = {
+        campo: {
+            "col": info.get("col"),
+            "col_letra": get_column_letter(info.get("col")),
+            "texto_header": info.get("texto"),
+            "score": info.get("score"),
+        }
+        for campo, info in campos.items()
+    }
+
+    return {
+        "hoja": nombre_hoja,
+        "fila_excel": fila_excel,
+        "columnas_excel": columnas_excel,
+        "campos_detectados": campos_detectados,
+        "mapa_campos": mapa_campos,
+    }
+
+
 def extraer_actividades(nombre_archivo):
     wb = openpyxl.load_workbook(
         nombre_archivo,
@@ -461,6 +541,13 @@ def extraer_actividades(nombre_archivo):
                 else:
                     row_dict[campo] = None
 
+            row_dict["datos_originales"] = construir_datos_originales(
+                nombre_hoja=nombre_hoja,
+                fila_excel=fila_idx,
+                fila=fila,
+                campos=campos,
+            )
+
             if fila_tiene_datos(row_dict):
                 actividades.append(row_dict)
 
@@ -501,6 +588,7 @@ def extraer_actividades(nombre_archivo):
         "riesgo_existente",
         "riesgo_introducido",
         "observacion",
+        "datos_originales",
     ]
 
     columnas_existentes = [c for c in columnas_ordenadas if c in df.columns]
@@ -664,19 +752,6 @@ def validar_ot(valor):
     OT válida:
     - 8 o 9 dígitos.
     - Debe iniciar con 100, 200 o 300.
-
-    Ejemplos válidos:
-    10006885      -> 8 dígitos
-    100012267     -> 9 dígitos
-    20012345      -> 8 dígitos
-    300123456     -> 9 dígitos
-
-    Ejemplos inválidos:
-    3500001867
-    3500621625
-    4500xxxx
-    21xxxxxx
-    GE01-CTPTVE2607-SBMMCM01
     """
 
     v_limpio = limpiar_ot(valor)
@@ -839,13 +914,6 @@ def generar_observaciones_forma(df):
         tipo_mant = txt_upper(row.get("tipo_mant", ""))
 
         # ============================================================
-        # PROVEEDOR
-        # ============================================================
-        # No se valida desde el Excel.
-        # El proveedor viene desde la web / tabla pms_archivos.
-        # ============================================================
-
-        # ============================================================
         # OT
         # ============================================================
         estado_ot, _ = validar_ot(row.get("ot_grafo", ""))
@@ -861,19 +929,19 @@ def generar_observaciones_forma(df):
                 sugerencia=(
                     "Completar la OT si ya fue generada. "
                     "Debe tener 8 o 9 dígitos y cumplir el patrón "
-                    "100xxxxx, 200xxxxx o 300xxxxx."
+                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
                 ),
             )
 
         elif estado_ot == "LONGITUD_INVALIDA":
-                agregar_obs(
-                    observaciones,
-                    row,
-                 campo="ot_grafo",
-                    nivel="ERROR",
-                    observacion="OT con cantidad incorrecta de dígitos.",
-                    valor=row.get("ot_grafo", ""),
-                    sugerencia="Verificar OT. Debe tener 8 o 9 dígitos, por ejemplo 10006885 o 100012267.",
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ERROR",
+                observacion="OT con cantidad incorrecta de dígitos.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia="Verificar OT. Debe tener 8 o 9 dígitos, por ejemplo 10006885 o 100012267.",
             )
 
         elif estado_ot == "PRIMER_DIGITO_INVALIDO":
@@ -886,7 +954,7 @@ def generar_observaciones_forma(df):
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
                     "La OT debe iniciar con 1, 2 o 3 y cumplir el patrón "
-                    "100xxxxx, 200xxxxx o 300xxxxx."
+                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
                 ),
             )
 
@@ -899,7 +967,8 @@ def generar_observaciones_forma(df):
                 observacion="OT no cumple el patrón esperado.",
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
-                    "La OT debe cumplir el patrón 100xxxxx, 200xxxxx o 300xxxxx. "
+                    "La OT debe cumplir el patrón 100xxxxx, 100xxxxxx, "
+                    "200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx. "
                     "No debe iniciar con 350, 450, 210, etc."
                 ),
             )
@@ -914,16 +983,9 @@ def generar_observaciones_forma(df):
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
                     "Completar una OT válida de 8 o 9 dígitos con patrón "
-                    "100xxxxx, 200xxxxx o 300xxxxx."
+                    "100xxxxx, 100xxxxxx, 200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx."
                 ),
             )
-
-        # ============================================================
-        # CENTRAL
-        # ============================================================
-        # No se marca como error si está vacía.
-        # La central se infiere desde el nombre de hoja.
-        # ============================================================
 
         # ============================================================
         # UNIDAD
@@ -1089,24 +1151,58 @@ def generar_observaciones_forma(df):
 # FUNCIÓN PRINCIPAL USADA POR main.py
 # ============================================================
 
-def preparar_datos_parser(ruta_excel, central_presentada=None):
+def preparar_datos_parser(
+    ruta_excel,
+    pms_archivo_id=None,
+    archivo_info=None,
+    central_presentada=None,
+):
+    """
+    Función principal llamada desde main.py.
+
+    Compatible con:
+    preparar_datos_parser(ruta_excel)
+    preparar_datos_parser(ruta_excel, central_presentada="C. T. Santa Rosa")
+    preparar_datos_parser(ruta_excel, pms_archivo_id=..., archivo_info=...)
+    """
+
+    if central_presentada is None:
+        central_presentada = obtener_central_presentada_desde_archivo_info(archivo_info)
+
+    proveedor_archivo = ""
+    semana_archivo = ""
+    archivo_path = ""
+
+    if isinstance(archivo_info, dict):
+        proveedor_archivo = archivo_info.get("proveedor") or ""
+        semana_archivo = archivo_info.get("semana") or ""
+        archivo_path = archivo_info.get("archivo_path") or ""
+
     df_actividades, df_hojas = extraer_actividades(ruta_excel)
 
     if df_actividades.empty:
+        detalle_observaciones = [{
+            "nivel": "ERROR",
+            "tipo_observacion": "No se detectaron actividades en el PMS.",
+            "central": "",
+            "unidad": "",
+            "actividad": "",
+            "inspector_responsable": "",
+            "fila_excel": 0,
+            "campo": "archivo",
+            "valor_detectado": "",
+            "sugerencia": "Verificar que el archivo tenga hojas visibles con encabezados reconocibles.",
+        }]
+
         return {
-            "actividades": [],
-            "observaciones": [{
-                "nivel": "ERROR",
-                "tipo_observacion": "No se detectaron actividades en el PMS.",
-                "central": "",
-                "unidad": "",
-                "actividad": "",
-                "inspector_responsable": "",
-                "fila_excel": 0,
-                "campo": "archivo",
-                "valor_detectado": "",
-                "sugerencia": "Verificar que el archivo tenga hojas visibles con encabezados reconocibles.",
-            }],
+            "pms_archivo_id": pms_archivo_id,
+            "proveedor": proveedor_archivo,
+            "semana": semana_archivo,
+            "archivo_path": archivo_path,
+            "actividades": 0,
+            "actividades_detalle": [],
+            "observaciones": 1,
+            "detalle_observaciones": detalle_observaciones,
             "hojas": df_hojas.to_dict(orient="records"),
             "centrales_detectadas": [],
             "central_presentada": central_presentada or "",
@@ -1118,9 +1214,6 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
 
     df_limpio = df_actividades.copy()
 
-    # ============================================================
-    # Asegurar columnas mínimas
-    # ============================================================
     columnas_minimas = [
         "proveedor",
         "hoja",
@@ -1138,15 +1231,16 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
         "recursos",
         "hora_inicio",
         "hora_fin",
+        "datos_originales",
     ]
 
     for col in columnas_minimas:
         if col not in df_limpio.columns:
-            df_limpio[col] = ""
+            if col == "datos_originales":
+                df_limpio[col] = [{} for _ in range(len(df_limpio))]
+            else:
+                df_limpio[col] = ""
 
-    # ============================================================
-    # Inferir central desde hoja si central está vacía
-    # ============================================================
     def inferir_central_desde_hoja(row):
         central = row.get("central", "")
         hoja = row.get("hoja", "")
@@ -1172,24 +1266,17 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
 
     df_limpio["central"] = df_limpio.apply(inferir_central_desde_hoja, axis=1)
 
-    # ============================================================
-    # Quitar filas completamente inútiles
-    # ============================================================
     df_limpio = df_limpio.dropna(
         subset=["central", "unidad", "sistema", "equipo", "motivo"],
         how="all",
     )
 
-    # ============================================================
-    # Convertir valores problemáticos a string seguro
-    # ============================================================
     for col in df_limpio.columns:
-        if col not in ["fila_excel"]:
+        if col not in ["fila_excel", "datos_originales"]:
             df_limpio[col] = df_limpio[col].apply(convertir_a_str_seguro)
 
-    # ============================================================
-    # Deduplicar
-    # ============================================================
+    df_limpio["datos_originales"] = df_limpio["datos_originales"].apply(json_seguro)
+
     cols_dedup = [
         "central",
         "unidad",
@@ -1224,20 +1311,28 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
     ].copy()
 
     if df_base_validable.empty:
+        detalle_observaciones = [{
+            "nivel": "ERROR",
+            "tipo_observacion": "Se detectaron encabezados, pero no actividades reales validables.",
+            "central": "",
+            "unidad": "",
+            "actividad": "",
+            "inspector_responsable": "",
+            "fila_excel": 0,
+            "campo": "archivo",
+            "valor_detectado": "",
+            "sugerencia": "Verificar que el PMS tenga filas de actividades con central, unidad, sistema, equipo o motivo.",
+        }]
+
         return {
-            "actividades": [],
-            "observaciones": [{
-                "nivel": "ERROR",
-                "tipo_observacion": "Se detectaron encabezados, pero no actividades reales validables.",
-                "central": "",
-                "unidad": "",
-                "actividad": "",
-                "inspector_responsable": "",
-                "fila_excel": 0,
-                "campo": "archivo",
-                "valor_detectado": "",
-                "sugerencia": "Verificar que el PMS tenga filas de actividades con central, unidad, sistema, equipo o motivo.",
-            }],
+            "pms_archivo_id": pms_archivo_id,
+            "proveedor": proveedor_archivo,
+            "semana": semana_archivo,
+            "archivo_path": archivo_path,
+            "actividades": 0,
+            "actividades_detalle": [],
+            "observaciones": 1,
+            "detalle_observaciones": detalle_observaciones,
             "hojas": df_hojas.to_dict(orient="records"),
             "centrales_detectadas": [],
             "central_presentada": central_presentada or "",
@@ -1247,9 +1342,6 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
             "estado": "ERROR - SIN ACTIVIDADES VALIDABLES",
         }
 
-    # ============================================================
-    # Generar observaciones base
-    # ============================================================
     df_obs = generar_observaciones_forma(df_base_validable)
 
     central_declarada_norm = normalizar_central_operativa(central_presentada)
@@ -1259,9 +1351,6 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
         if c
     ])
 
-    # ============================================================
-    # Validar central declarada vs centrales detectadas
-    # ============================================================
     if central_declarada_norm:
         centrales_fuera = [
             c for c in centrales_detectadas
@@ -1317,10 +1406,7 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
     else:
         estado = "OBSERVADO - REQUIERE CORRECCIÓN"
 
-    # ============================================================
-    # Salida actividades
-    # ============================================================
-    actividades = []
+    actividades_detalle = []
 
     for _, r in df_base_validable.iterrows():
         fila_excel = r.get("fila_excel", 0)
@@ -1330,7 +1416,9 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
         except Exception:
             fila_excel = 0
 
-        actividades.append({
+        datos_originales = json_seguro(r.get("datos_originales", {}))
+
+        actividad_item = {
             "fila_excel": fila_excel,
             "central": convertir_a_str_seguro(r.get("central_norm", r.get("central", ""))),
             "unidad": convertir_a_str_seguro(r.get("unidad", "")),
@@ -1339,15 +1427,39 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
             "actividad": convertir_a_str_seguro(r.get("motivo", "")),
             "ot_grafo": convertir_a_str_seguro(r.get("ot_grafo", "")),
             "tipo_mant": convertir_a_str_seguro(r.get("tipo_mant", "")),
+            "condicion": convertir_a_str_seguro(r.get("condicion", "")),
             "riesgo": convertir_a_str_seguro(r.get("riesgo", "")),
             "inspector": convertir_a_str_seguro(r.get("inspector", "")),
             "rt_terceros": convertir_a_str_seguro(r.get("rt_terceros", "")),
-        })
+            "datos_originales": datos_originales,
+        }
 
-    # ============================================================
-    # Salida observaciones
-    # ============================================================
-    observaciones = []
+        campos_extra = [
+            "proveedor",
+            "hoja",
+            "cod_pm_aviso",
+            "pedido",
+            "area_solicitante",
+            "recursos",
+            "hora_inicio",
+            "hora_fin",
+            "dias",
+            "fecha_inicio",
+            "fecha_fin",
+            "codigo_actividad",
+            "texto_explicativo",
+            "riesgo_existente",
+            "riesgo_introducido",
+            "observacion",
+        ]
+
+        for campo in campos_extra:
+            if campo in r:
+                actividad_item[campo] = convertir_a_str_seguro(r.get(campo, ""))
+
+        actividades_detalle.append(actividad_item)
+
+    detalle_observaciones = []
 
     for _, r in df_obs.iterrows():
         fila_excel = r.get("fila_excel", 0)
@@ -1357,7 +1469,7 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
         except Exception:
             fila_excel = 0
 
-        observaciones.append({
+        detalle_observaciones.append({
             "nivel": convertir_a_str_seguro(r.get("nivel", "")),
             "tipo_observacion": convertir_a_str_seguro(r.get("tipo_observacion", "")),
             "central": convertir_a_str_seguro(r.get("central", "")),
@@ -1371,13 +1483,29 @@ def preparar_datos_parser(ruta_excel, central_presentada=None):
         })
 
     return {
-        "actividades": actividades,
-        "observaciones": observaciones,
+        "pms_archivo_id": pms_archivo_id,
+        "proveedor": proveedor_archivo,
+        "semana": semana_archivo,
+        "archivo_path": archivo_path,
+
+        # Resumen numérico para pms_archivos
+        "actividades": int(len(actividades_detalle)),
+        "observaciones": int(len(detalle_observaciones)),
+        "errores": int(errores),
+        "advertencias": int(advertencias),
+        "estado": estado,
+
+        # Detalle para insertar en tablas
+        "actividades_detalle": actividades_detalle,
+        "detalle_actividades": actividades_detalle,
+        "actividades_data": actividades_detalle,
+        "detalle_observaciones": detalle_observaciones,
+        "observaciones_detalle": detalle_observaciones,
+        "observaciones_data": detalle_observaciones,
+
+        # Metadata
         "hojas": df_hojas.to_dict(orient="records"),
         "centrales_detectadas": centrales_detectadas,
         "central_presentada": central_presentada or "",
         "central_presentada_norm": central_declarada_norm,
-        "errores": int(errores),
-        "advertencias": int(advertencias),
-        "estado": estado,
     }
