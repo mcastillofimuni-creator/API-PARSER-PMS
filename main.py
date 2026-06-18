@@ -3,20 +3,15 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 
 from parser_pms import preparar_datos_parser
+from generador_programa import generar_programa_unico
 
-
-# ============================================================
-# CARGA DE VARIABLES DE ENTORNO
-# ============================================================
-
-load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -24,287 +19,44 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "pms-archivos").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*").strip()
 
 if not SUPABASE_URL:
-    raise RuntimeError("Falta variable de entorno SUPABASE_URL")
+    raise RuntimeError("Falta la variable de entorno SUPABASE_URL.")
 
 if not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("Falta variable de entorno SUPABASE_SERVICE_ROLE_KEY")
+    raise RuntimeError("Falta la variable de entorno SUPABASE_SERVICE_ROLE_KEY.")
 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-
-# ============================================================
-# APP FASTAPI
-# ============================================================
-
 app = FastAPI(
     title="PMS Parser API",
-    version="1.0.0",
-    description="API para validar PMS semanales y guardar actividades/observaciones en Supabase.",
+    version="1.1.0",
+    description="API para validar PMS semanales y generar programa único consolidado.",
 )
 
-allowed_origins = ["*"] if FRONTEND_ORIGIN == "*" else [
-    origin.strip()
-    for origin in FRONTEND_ORIGIN.split(",")
-    if origin.strip()
+origins = ["*"] if FRONTEND_ORIGIN == "*" else [
+    FRONTEND_ORIGIN,
+    "https://pms-orygen.vercel.app",
+    "https://pms-orygen-git-main-mancastle-s-projects.vercel.app",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
-
-# ============================================================
-# MODELOS
-# ============================================================
 
 class ValidarRequest(BaseModel):
     pms_archivo_id: str
 
 
-# ============================================================
-# UTILIDADES
-# ============================================================
+class GenerarProgramaRequest(BaseModel):
+    semana: str
+    central: str
 
-def ejecutar_select_archivo(pms_archivo_id: str) -> Dict[str, Any]:
-    """
-    Obtiene la fila del archivo PMS desde pms_archivos.
-    """
-
-    try:
-        resp = (
-            supabase
-            .table("pms_archivos")
-            .select("*")
-            .eq("id", pms_archivo_id)
-            .single()
-            .execute()
-        )
-
-        if not resp.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No se encontró pms_archivo_id={pms_archivo_id}",
-            )
-
-        return resp.data
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error consultando pms_archivos: {str(exc)}",
-        )
-
-
-def descargar_archivo_storage(archivo_path: str, nombre_archivo: Optional[str] = None) -> str:
-    """
-    Descarga el Excel desde Supabase Storage y lo guarda temporalmente.
-    Retorna la ruta local.
-    """
-
-    if not archivo_path:
-        raise HTTPException(
-            status_code=400,
-            detail="El registro no tiene archivo_path. No hay archivo para validar.",
-        )
-
-    try:
-        contenido = supabase.storage.from_(SUPABASE_BUCKET).download(archivo_path)
-
-        suffix = ".xlsx"
-
-        if nombre_archivo:
-            nombre_lower = nombre_archivo.lower()
-            if nombre_lower.endswith(".xlsm"):
-                suffix = ".xlsm"
-            elif nombre_lower.endswith(".xls"):
-                suffix = ".xls"
-            elif nombre_lower.endswith(".csv"):
-                suffix = ".csv"
-            elif nombre_lower.endswith(".xlsx"):
-                suffix = ".xlsx"
-
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        tmp.write(contenido)
-        tmp.flush()
-        tmp.close()
-
-        return tmp.name
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudo descargar el archivo desde Storage: {str(exc)}",
-        )
-
-
-def limpiar_resultados_previos(pms_archivo_id: str) -> None:
-    """
-    Borra actividades y observaciones previas para evitar duplicados
-    cuando se valida nuevamente el mismo PMS.
-    """
-
-    try:
-        (
-            supabase
-            .table("pms_actividades")
-            .delete()
-            .eq("pms_archivo_id", pms_archivo_id)
-            .execute()
-        )
-
-        (
-            supabase
-            .table("pms_observaciones")
-            .delete()
-            .eq("pms_archivo_id", pms_archivo_id)
-            .execute()
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudieron limpiar resultados previos: {str(exc)}",
-        )
-
-
-def insertar_actividades(
-    pms_archivo_id: str,
-    semana: str,
-    proveedor: str,
-    actividades: List[Dict[str, Any]],
-) -> None:
-    """
-    Inserta actividades parseadas en pms_actividades.
-    """
-
-    if not actividades:
-        return
-
-    filas = []
-
-    for act in actividades:
-        filas.append({
-            "pms_archivo_id": pms_archivo_id,
-            "semana": semana,
-            "proveedor": proveedor,
-            "fila_excel": act.get("fila_excel", 0),
-            "central": act.get("central", ""),
-            "unidad": act.get("unidad", ""),
-            "sistema": act.get("sistema", ""),
-            "equipo": act.get("equipo", ""),
-            "actividad": act.get("actividad", ""),
-            "ot_grafo": act.get("ot_grafo", ""),
-            "riesgo": act.get("riesgo", ""),
-            "inspector": act.get("inspector", ""),
-            "rt_terceros": act.get("rt_terceros", ""),
-        })
-
-    try:
-        (
-            supabase
-            .table("pms_actividades")
-            .insert(filas)
-            .execute()
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudieron insertar actividades: {str(exc)}",
-        )
-
-
-def insertar_observaciones(
-    pms_archivo_id: str,
-    semana: str,
-    proveedor: str,
-    observaciones: List[Dict[str, Any]],
-) -> None:
-    """
-    Inserta observaciones parseadas en pms_observaciones.
-    """
-
-    if not observaciones:
-        return
-
-    filas = []
-
-    for obs in observaciones:
-        filas.append({
-            "pms_archivo_id": pms_archivo_id,
-            "semana": semana,
-            "proveedor": proveedor,
-            "nivel": obs.get("nivel", ""),
-            "central": obs.get("central", ""),
-            "tipo_observacion": obs.get("tipo_observacion", ""),
-            "unidad": obs.get("unidad", ""),
-            "actividad": obs.get("actividad", ""),
-            "inspector_responsable": obs.get("inspector_responsable", ""),
-            "fila_excel": obs.get("fila_excel", 0),
-            "campo": obs.get("campo", ""),
-            "valor_detectado": obs.get("valor_detectado", ""),
-            "sugerencia": obs.get("sugerencia", ""),
-        })
-
-    try:
-        (
-            supabase
-            .table("pms_observaciones")
-            .insert(filas)
-            .execute()
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudieron insertar observaciones: {str(exc)}",
-        )
-
-
-def actualizar_archivo_validado(
-    pms_archivo_id: str,
-    resultado: Dict[str, Any],
-) -> None:
-    """
-    Actualiza resumen de validación en pms_archivos.
-    """
-
-    payload = {
-        "estado_validacion": resultado.get("estado", ""),
-        "errores": int(resultado.get("errores", 0) or 0),
-        "advertencias": int(resultado.get("advertencias", 0) or 0),
-        "actividades": len(resultado.get("actividades", []) or []),
-        "observaciones": len(resultado.get("observaciones", []) or []),
-        "centrales_detectadas": resultado.get("centrales_detectadas", []) or [],
-    }
-
-    try:
-        (
-            supabase
-            .table("pms_archivos")
-            .update(payload)
-            .eq("id", pms_archivo_id)
-            .execute()
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudo actualizar pms_archivos: {str(exc)}",
-        )
-
-
-# ============================================================
-# ENDPOINTS
-# ============================================================
 
 @app.get("/")
 def root():
@@ -312,6 +64,11 @@ def root():
         "ok": True,
         "service": "PMS Parser API",
         "message": "API activa",
+        "endpoints": [
+            "/health",
+            "/validar-pms",
+            "/generar-programa-unico",
+        ],
     }
 
 
@@ -321,6 +78,215 @@ def health():
         "ok": True,
         "status": "healthy",
     }
+
+
+def descargar_archivo_storage(archivo_path: str) -> str:
+    """
+    Descarga desde Supabase Storage el Excel asociado al PMS.
+    Retorna la ruta temporal local.
+    """
+    if not archivo_path:
+        raise HTTPException(status_code=400, detail="El registro no tiene archivo_path.")
+
+    try:
+        contenido = supabase.storage.from_(SUPABASE_BUCKET).download(archivo_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo descargar el archivo desde Storage: {exc}",
+        )
+
+    suffix = Path(archivo_path).suffix or ".xlsx"
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(contenido)
+    tmp.flush()
+    tmp.close()
+
+    return tmp.name
+
+
+def obtener_registro_archivo(pms_archivo_id: str) -> Dict[str, Any]:
+    """
+    Busca el registro principal en pms_archivos.
+    """
+    resp = (
+        supabase.table("pms_archivos")
+        .select("*")
+        .eq("id", pms_archivo_id)
+        .single()
+        .execute()
+    )
+
+    if not resp.data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró pms_archivo_id: {pms_archivo_id}",
+        )
+
+    return resp.data
+
+
+def borrar_resultados_previos(pms_archivo_id: str):
+    """
+    Borra actividades y observaciones previas del mismo archivo.
+    Esto permite revalidar o reemplazar archivo sin duplicar resultados.
+    """
+    try:
+        supabase.table("pms_observaciones").delete().eq("pms_archivo_id", pms_archivo_id).execute()
+        supabase.table("pms_actividades").delete().eq("pms_archivo_id", pms_archivo_id).execute()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudieron borrar resultados anteriores: {exc}",
+        )
+
+
+def normalizar_lista(valor):
+    if valor is None:
+        return []
+
+    if isinstance(valor, list):
+        return valor
+
+    return []
+
+
+def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
+    """
+    Inserta actividades devueltas por parser_pms.py.
+    Soporta varios nombres por compatibilidad:
+    - actividades_detalle
+    - detalle_actividades
+    - actividades_data
+    """
+    actividades = (
+        resultado.get("actividades_detalle")
+        or resultado.get("detalle_actividades")
+        or resultado.get("actividades_data")
+        or []
+    )
+
+    if not isinstance(actividades, list) or len(actividades) == 0:
+        return
+
+    filas = []
+
+    for a in actividades:
+        if not isinstance(a, dict):
+            continue
+
+        fila = {
+            "pms_archivo_id": pms_archivo_id,
+            "semana": resultado.get("semana"),
+            "proveedor": resultado.get("proveedor"),
+            "fila_excel": a.get("fila_excel"),
+            "central": a.get("central"),
+            "unidad": a.get("unidad"),
+            "sistema": a.get("sistema"),
+            "equipo": a.get("equipo"),
+            "actividad": a.get("actividad"),
+            "ot_grafo": a.get("ot_grafo"),
+            "riesgo": a.get("riesgo"),
+            "inspector": a.get("inspector") or a.get("inspector_responsable"),
+            "rt_terceros": a.get("rt_terceros"),
+        }
+
+        # Campos opcionales si existen en tu tabla.
+        if "condicion" in a:
+            fila["condicion"] = a.get("condicion")
+
+        if "dias" in a:
+            fila["dias"] = normalizar_lista(a.get("dias"))
+
+        filas.append(fila)
+
+    if filas:
+        try:
+            supabase.table("pms_actividades").insert(filas).execute()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No se pudieron insertar actividades: {exc}",
+            )
+
+
+def insertar_observaciones(pms_archivo_id: str, resultado: Dict[str, Any]):
+    """
+    Inserta observaciones devueltas por parser_pms.py.
+    """
+    observaciones = (
+        resultado.get("detalle_observaciones")
+        or resultado.get("observaciones_detalle")
+        or resultado.get("observaciones_data")
+        or []
+    )
+
+    if not isinstance(observaciones, list) or len(observaciones) == 0:
+        return
+
+    filas = []
+
+    for o in observaciones:
+        if not isinstance(o, dict):
+            continue
+
+        filas.append(
+            {
+                "pms_archivo_id": pms_archivo_id,
+                "semana": resultado.get("semana"),
+                "proveedor": resultado.get("proveedor"),
+                "nivel": o.get("nivel"),
+                "tipo_observacion": o.get("tipo_observacion") or o.get("observacion"),
+                "central": o.get("central"),
+                "unidad": o.get("unidad"),
+                "actividad": o.get("actividad"),
+                "inspector_responsable": o.get("inspector_responsable") or o.get("inspector"),
+                "fila_excel": o.get("fila_excel"),
+                "campo": o.get("campo"),
+                "valor_detectado": o.get("valor_detectado") or o.get("valor"),
+                "sugerencia": o.get("sugerencia"),
+            }
+        )
+
+    if filas:
+        try:
+            supabase.table("pms_observaciones").insert(filas).execute()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No se pudieron insertar observaciones: {exc}",
+            )
+
+
+def actualizar_resumen_archivo(pms_archivo_id: str, resultado: Dict[str, Any]):
+    """
+    Actualiza pms_archivos con el resultado final.
+    """
+    payload = {
+        "estado_validacion": resultado.get("estado") or resultado.get("estado_validacion") or "VALIDADO",
+        "errores": int(resultado.get("errores") or 0),
+        "advertencias": int(resultado.get("advertencias") or 0),
+        "actividades": int(resultado.get("actividades") or 0),
+        "observaciones": int(resultado.get("observaciones") or 0),
+    }
+
+    if "central_presentada" in resultado:
+        payload["central_presentada"] = resultado.get("central_presentada")
+
+    if "central_presentada_norm" in resultado:
+        payload["central_presentada_norm"] = resultado.get("central_presentada_norm")
+
+    if "centrales_detectadas" in resultado:
+        payload["centrales_detectadas"] = normalizar_lista(resultado.get("centrales_detectadas"))
+
+    try:
+        supabase.table("pms_archivos").update(payload).eq("id", pms_archivo_id).execute()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo actualizar pms_archivos: {exc}",
+        )
 
 
 @app.post("/validar-pms")
@@ -337,77 +303,119 @@ def validar_pms(req: ValidarRequest):
     6. Inserta observaciones.
     7. Actualiza resumen en pms_archivos.
     """
+    pms_archivo_id = req.pms_archivo_id
 
-    pms_archivo_id = req.pms_archivo_id.strip()
-
-    if not pms_archivo_id:
-        raise HTTPException(
-            status_code=400,
-            detail="pms_archivo_id es obligatorio.",
-        )
-
-    archivo = ejecutar_select_archivo(pms_archivo_id)
-
-    semana = archivo.get("semana", "") or ""
-    proveedor = archivo.get("proveedor", "") or ""
-    archivo_path = archivo.get("archivo_path", "") or ""
-    archivo_nombre = archivo.get("archivo_nombre", "") or ""
-    central_presentada = archivo.get("central_presentada", "") or ""
-
-    ruta_temporal = None
+    registro = obtener_registro_archivo(pms_archivo_id)
+    archivo_path = registro.get("archivo_path")
 
     try:
-        ruta_temporal = descargar_archivo_storage(
-            archivo_path=archivo_path,
-            nombre_archivo=archivo_nombre,
-        )
+        supabase.table("pms_archivos").update(
+            {
+                "estado_validacion": "VALIDANDO...",
+                "errores": 0,
+                "advertencias": 0,
+                "actividades": 0,
+                "observaciones": 0,
+            }
+        ).eq("id", pms_archivo_id).execute()
+    except Exception:
+        pass
+
+    ruta_local = None
+
+    try:
+        ruta_local = descargar_archivo_storage(archivo_path)
 
         resultado = preparar_datos_parser(
-            ruta_temporal,
-            central_presentada=central_presentada,
-        )
-
-        limpiar_resultados_previos(pms_archivo_id)
-
-        insertar_actividades(
+            ruta_local,
             pms_archivo_id=pms_archivo_id,
-            semana=semana,
-            proveedor=proveedor,
-            actividades=resultado.get("actividades", []),
+            archivo_info=registro,
         )
 
-        insertar_observaciones(
-            pms_archivo_id=pms_archivo_id,
-            semana=semana,
-            proveedor=proveedor,
-            observaciones=resultado.get("observaciones", []),
-        )
+        if not isinstance(resultado, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="El parser no devolvió un diccionario válido.",
+            )
 
-        actualizar_archivo_validado(
-            pms_archivo_id=pms_archivo_id,
-            resultado=resultado,
-        )
+        resultado["pms_archivo_id"] = pms_archivo_id
+        resultado.setdefault("proveedor", registro.get("proveedor"))
+        resultado.setdefault("semana", registro.get("semana"))
+        resultado.setdefault("archivo_path", registro.get("archivo_path"))
+
+        borrar_resultados_previos(pms_archivo_id)
+        insertar_actividades(pms_archivo_id, resultado)
+        insertar_observaciones(pms_archivo_id, resultado)
+        actualizar_resumen_archivo(pms_archivo_id, resultado)
 
         return {
             "ok": True,
-            "pms_archivo_id": pms_archivo_id,
-            "proveedor": proveedor,
-            "semana": semana,
-            "central_presentada": resultado.get("central_presentada", central_presentada),
-            "central_presentada_norm": resultado.get("central_presentada_norm", ""),
-            "centrales_detectadas": resultado.get("centrales_detectadas", []),
-            "archivo_path": archivo_path,
-            "estado": resultado.get("estado", ""),
-            "errores": resultado.get("errores", 0),
-            "advertencias": resultado.get("advertencias", 0),
-            "actividades": len(resultado.get("actividades", []) or []),
-            "observaciones": len(resultado.get("observaciones", []) or []),
-            "detalle_observaciones": resultado.get("observaciones", []),
+            **resultado,
         }
 
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        try:
+            supabase.table("pms_archivos").update(
+                {
+                    "estado_validacion": "ERROR EN VALIDACIÓN",
+                    "errores": 1,
+                }
+            ).eq("id", pms_archivo_id).execute()
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error validando PMS: {exc}",
+        )
+
     finally:
-        if ruta_temporal:
+        if ruta_local:
             try:
-                Path(ruta_temporal).unlink(missing_ok=True)
+                os.remove(ruta_local)
             except Exception:
                 pass
+
+
+@app.post("/generar-programa-unico")
+def generar_programa_unico_endpoint(req: GenerarProgramaRequest):
+    """
+    Genera un Excel consolidado usando la plantilla:
+    PROGRAMA SEMANAL PLANTILLA.xlsx
+
+    Recibe:
+    {
+      "semana": "2026-06-13",
+      "central": "SANTA ROSA"
+    }
+
+    o:
+    {
+      "semana": "2026-06-13",
+      "central": "VENTANILLA"
+    }
+    """
+    try:
+        resultado = generar_programa_unico(
+            supabase=supabase,
+            semana=req.semana,
+            central=req.central,
+        )
+
+        archivo_generado = resultado["archivo_generado"]
+        nombre_archivo = resultado["nombre_archivo"]
+
+        return FileResponse(
+            path=archivo_generado,
+            filename=nombre_archivo,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo generar el programa único: {exc}",
+        )
