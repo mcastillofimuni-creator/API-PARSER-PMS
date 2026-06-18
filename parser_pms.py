@@ -903,6 +903,10 @@ def score_numero_ot_vs_aviso(valor_ot):
     """
     Evalúa el número colocado en OT/Grafo usando patrón histórico.
     Score positivo = más sospecha de Aviso colocado como OT.
+
+    Regla afinada:
+    - 200, 300 y 400 se tratan como patrones probables de OT.
+    - Solo los 100 bajos entran como zona realmente sospechosa de Aviso SAP.
     """
     n = limpiar_ot(valor_ot)
 
@@ -917,11 +921,12 @@ def score_numero_ot_vs_aviso(valor_ot):
 
     # En el histórico, 300 y 400 son casi siempre OT.
     if n.startswith(("300", "400")):
-        return -25, "Número con patrón muy probable de OT."
+        return -40, "Número con patrón muy probable de OT."
 
-    # 200 suele ser OT, aunque hay pocos avisos 200.
+    # 200xxxxx es principalmente OT correctiva.
+    # No debe observarse solo porque el texto diga falla/correctivo.
     if n.startswith("200"):
-        return 5, "Número con patrón probable de OT."
+        return -35, "Número con patrón probable de OT correctiva."
 
     # Zona de mayor confusión: números 100 bajos.
     if n.startswith("100"):
@@ -932,7 +937,7 @@ def score_numero_ot_vs_aviso(valor_ot):
                 return 35, "Número dentro del rango típico de Avisos SAP."
 
             if num > AVISO_RANGO_100_MAX:
-                return -15, "Número 100 fuera del rango típico de Avisos SAP."
+                return -20, "Número 100 fuera del rango típico de Avisos SAP."
         except Exception:
             pass
 
@@ -1029,6 +1034,25 @@ def evaluar_ot_vs_aviso(ot_grafo, aviso, actividad, tipo_mant="", condicion=""):
         score_num, motivo_num = score_numero_ot_vs_aviso(ot)
         score = score_num + score_txt
         motivos.append(motivo_num)
+
+        # Regla de exclusión:
+        # Si el número informado como OT inicia con 200, 300 o 400,
+        # no lo tratamos como posible Aviso SAP. En el histórico estos
+        # patrones corresponden principalmente a OT, especialmente 200 como OT correctiva.
+        # Esto evita falsos positivos como:
+        # OT 20002260 + actividad "FALLA..." => debe ser probable OT, no aviso.
+        if ot.startswith(("200", "300", "400")):
+            return {
+                "aplica": False,
+                "nivel": "",
+                "score": 0,
+                "campo": "",
+                "valor": "",
+                "tipo_observacion": "",
+                "sugerencia": "",
+                "motivos": [],
+            }
+
         motivos.extend(motivos_txt[:4])
 
         tipo_norm = normalizar_texto(tipo_mant)
@@ -1288,7 +1312,7 @@ def generar_observaciones_forma(df):
                 valor=row.get("ot_grafo", ""),
                 sugerencia=(
                     "La OT debe cumplir el patrón 100xxxxx, 100xxxxxx, "
-                    "200xxxxx, 200xxxxxx, 300xxxxx o 300xxxxxx. "
+                    "200xxxxx, 200xxxxxx, 300xxxxx, 300xxxxxx, 400xxxxx o 400xxxxxx. "
                     "No debe iniciar con 350, 450, 210, etc."
                 ),
             )
