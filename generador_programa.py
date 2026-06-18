@@ -709,9 +709,20 @@ def preparar_filas_destino(ws, total_actividades):
         copiar_estilo_fila(ws, FILA_MODELO_ESTILO, fila, max_col)
 
 
+def obtener_numero_pms(semana):
+    """
+    Calcula el número PMS usando la semana ISO.
+    Ejemplo:
+    2026-06-20 corresponde a PMS 25.
+    """
+    semana_inicio = parse_semana_inicio(semana)
+    return semana_inicio.isocalendar().week
+
+
 def nombre_archivo_salida(semana, central_norm):
+    numero_pms = obtener_numero_pms(semana)
     central_limpia = central_norm.replace(" ", "_")
-    return f"PROGRAMA_UNICO_{central_limpia}_{semana}.xlsx"
+    return f"PMS_{numero_pms}_PROGRAMA_UNICO_{central_limpia}_{semana}.xlsx"
 
 
 def generar_programa_unico(
@@ -779,12 +790,16 @@ def generar_programa_unico(
 
     wb.save(salida_path)
 
-    return {
-        "ok": True,
-        "archivo_generado": str(salida_path),
-        "nombre_archivo": salida_path.name,
-        "total_actividades": len(actividades),
-        "central": central_norm,
-        "central_label": CENTRAL_LABEL[central_norm],
-        "semana": semana,
-    }
+   numero_pms = obtener_numero_pms(semana)
+
+return {
+    "ok": True,
+    "archivo_generado": str(salida_path),
+    "nombre_archivo": salida_path.name,
+    "total_actividades": len(actividades),
+    "central": central_norm,
+    "central_label": CENTRAL_LABEL[central_norm],
+    "semana": semana,
+    "numero_pms": numero_pms,
+    "pms_label": f"PMS {numero_pms}",
+}
