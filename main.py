@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +29,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 app = FastAPI(
     title="PMS Parser API",
-    version="1.1.0",
+    version="1.2.0",
     description="API para validar PMS semanales y generar programa único consolidado.",
 )
 
@@ -78,6 +78,36 @@ def health():
         "ok": True,
         "status": "healthy",
     }
+
+
+def hacer_json_serializable(valor):
+    """
+    Convierte valores raros de Excel/Pandas/OpenPyXL en algo que Supabase JSONB acepte.
+    Evita que datos_originales reviente por fechas, objetos o NaN.
+    """
+    if valor is None:
+        return None
+
+    if isinstance(valor, (str, int, float, bool)):
+        # Evitar NaN: JSON no lo quiere como invitado en la fiesta.
+        if isinstance(valor, float) and valor != valor:
+            return None
+        return valor
+
+    if isinstance(valor, dict):
+        return {
+            str(k): hacer_json_serializable(v)
+            for k, v in valor.items()
+        }
+
+    if isinstance(valor, list):
+        return [hacer_json_serializable(v) for v in valor]
+
+    if isinstance(valor, tuple):
+        return [hacer_json_serializable(v) for v in valor]
+
+    # Fechas, decimales, objetos de Excel, etc.
+    return str(valor)
 
 
 def descargar_archivo_storage(archivo_path: str) -> str:
@@ -155,10 +185,11 @@ def normalizar_lista(valor):
 def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
     """
     Inserta actividades devueltas por parser_pms.py.
-    Soporta varios nombres por compatibilidad:
-    - actividades_detalle
-    - detalle_actividades
-    - actividades_data
+
+    Ahora también guarda:
+    - datos_originales jsonb
+
+    Esto permitirá generar el programa único con más columnas de la plantilla.
     """
     actividades = (
         resultado.get("actividades_detalle")
@@ -176,6 +207,14 @@ def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
         if not isinstance(a, dict):
             continue
 
+        datos_originales = (
+            a.get("datos_originales")
+            or a.get("fila_original")
+            or a.get("raw")
+            or a.get("row_original")
+            or {}
+        )
+
         fila = {
             "pms_archivo_id": pms_archivo_id,
             "semana": resultado.get("semana"),
@@ -190,6 +229,7 @@ def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
             "riesgo": a.get("riesgo"),
             "inspector": a.get("inspector") or a.get("inspector_responsable"),
             "rt_terceros": a.get("rt_terceros"),
+            "datos_originales": hacer_json_serializable(datos_originales),
         }
 
         # Campos opcionales si existen en tu tabla.
