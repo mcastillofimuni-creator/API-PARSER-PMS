@@ -290,40 +290,250 @@ def actualizar_encabezado_semana(ws, semana_inicio):
             pass
 
 
-def consultar_archivos_semana(supabase, semana):
+def consultar_archivos_semana(supabase, semana, central_norm):
+    """
+    Trae archivos de la semana, filtra por central y se queda solo con
+    el último archivo válido por proveedor.
+
+    Esto evita que el consolidado jale versiones antiguas, pruebas o duplicados.
+    """
     resp = (
         supabase.table("pms_archivos")
         .select(
             "id,semana,proveedor,expositor,central_presentada,central_presentada_norm,"
             "archivo_nombre,estado_validacion,errores,advertencias,actividades,"
-            "observaciones,dias"
+            "observaciones,dias,fecha_carga"
         )
         .eq("semana", semana)
+        .order("fecha_carga", desc=True)
         .execute()
     )
 
-    data = resp.data or []
-    return {x["id"]: x for x in data if x.get("id")}
+    archivos = resp.data or []
 
+    archivos_validos = []
 
-def consultar_actividades(supabase, semana, central_norm):
+    for a in archivos:
+        estado = normalizar_texto(a.get("estado_validacion", "")).upper()
+
+        # Excluir cargas que nunca llegaron a validarse o siguen en proceso.
+        if "ERROR API" in estado:
+            continue
+
+        if "VALIDANDO" in estado:
+            continue
+
+        if not a.get("id"):
+            continue
+
+        central_archivo = normalizar_central(
+            a.get("central_presentada_norm")
+            or a.get("central_presentada")
+            or ""
+        )
+
+        if central_archivo != central_norm:
+            continue
+
+        proveedor = normalizar_texto(a.get("proveedor", "")).upper()
+
+        if not proveedor:
+            proveedor = f"SIN_PROVEEDOR_{a.get('id')}"
+
+        a["_proveedor_norm"] = proveedor
+        archivos_validos.append(a)
+
+    # Como vienen ordenados por fecha_carga desc, el primero de cada proveedor es el vigente.
+    vigente_por_proveedor = {}
+
+    for a in archivos_validos:
+        proveedor = a["_proveedor_norm"]
+
+        if proveedor not in vigente_por_proveedor:
+            vigente_por_proveedor[proveedor] = a
+
+    return vigente_por_proveedor
+
+def consultar_actividades(supabase, semana, central_norm, archivos_vigentes):
     """
-    Consulta actividades de la semana y central.
-    Se filtra por pms_actividades.central para consolidar únicamente
-    Santa Rosa o Ventanilla, aunque el archivo original tenga más hojas.
+    Consulta actividades solo de los archivos vigentes por proveedor.
+    Luego filtra filas pobres y elimina duplicados técnicos.
     """
+    ids_vigentes = [a["id"] for a in archivos_vigentes.values() if a.get("id")]
+
+    if not ids_vigentes:
+        return []
+
     resp = (
         supabase.table("pms_actividades")
         .select("*")
         .eq("semana", semana)
         .eq("central", central_norm)
+        .in_("pms_archivo_id", ids_vigentes)
         .order("proveedor")
         .order("fila_excel")
         .limit(5000)
         .execute()
     )
 
-    return resp.data or []
+    actividades = resp.data or []
+
+    actividades = [
+        a for a in actividades
+        if es_actividad_consolidable(a)
+    ]
+
+    actividades = quitar_duplicados_tecnicos(actividades)
+
+    return actividades
+
+def valor_limpio(valor):
+    if valor is None:
+        return ""
+
+    texto = str(valor).strip()
+
+    if texto.upper() in ["", "NULL", "NONE", "NAN", "EMPTY", "-", "--"]:
+        return ""
+
+    return texto
+
+
+def obtener_columna_original(actividad, columna):
+    """
+    Devuelve valor desde datos_originales.columnas_excel.
+    """
+    columnas = obtener_columnas_originales(actividad)
+
+    valor = columnas.get(columna)
+
+    return valor_limpio(valor)
+
+
+def es_actividad_consolidable(actividad):
+    """
+    Evita que entren filas pobres, subtítulos, residuos de formato
+    o filas que solo tienen central/proveedor/actividad.
+
+    Una actividad debe tener suficiente información técnica.
+    """
+    ot = valor_limpio(actividad.get("ot_grafo")) or obtener_columna_original(actividad, "C")
+    central = valor_limpio(actividad.get("central")) or obtener_columna_original(actividad, "D")
+    unidad = valor_limpio(actividad.get("unidad")) or obtener_columna_original(actividad, "E")
+    sistema = valor_limpio(actividad.get("sistema")) or obtener_columna_original(actividad, "F")
+    equipo = valor_limpio(actividad.get("equipo")) or obtener_columna_original(actividad, "G")
+    tipo_mant = valor_limpio(actividad.get("tipo_mant")) or obtener_columna_original(actividad, "K")
+    condicion = valor_limpio(actividad.get("condicion")) or obtener_columna_original(actividad, "L")
+    inspector = valor_limpio(actividad.get("inspector")) or obtener_columna_original(actividad, "O")
+    rt = valor_limpio(actividad.get("rt_terceros")) or obtener_columna_original(actividad, "P")
+    actividad_txt = valor_limpio(actividad.get("actividad")) or obtener_columna_original(actividad, "AF")
+
+    texto_total = " ".join([
+        ot,
+        central,
+        unidad,
+        sistema,
+        equipo,
+        tipo_mant,
+        condicion,
+        inspector,
+        rt,
+        actividad_txt,
+    ]).upper()
+
+    palabras_basura = [
+        "TOTAL",
+        "SUBTOTAL",
+        "LEYENDA",
+        "OBSERVACION",
+        "OBSERVACIONES",
+        "PROGRAMA SEMANAL",
+        "SEMANA",
+        "ELABORADO",
+        "REVISADO",
+        "APROBADO",
+        "FIRMA",
+    ]
+
+    if any(p in texto_total for p in palabras_basura):
+        return False
+
+    campos_fuertes = [
+        ot,
+        unidad,
+        sistema,
+        equipo,
+        tipo_mant,
+        inspector,
+        rt,
+        actividad_txt,
+    ]
+
+    llenos = [c for c in campos_fuertes if valor_limpio(c)]
+
+    # Regla práctica:
+    # si no tiene al menos 4 campos técnicos fuertes, no debería ir al consolidado.
+    if len(llenos) < 4:
+        return False
+
+    # Si solo tiene actividad pero no tiene sistema/equipo/unidad, probablemente es residuo.
+    if actividad_txt and not unidad and not sistema and not equipo:
+        return False
+
+    return True
+
+
+def clave_dedupe_actividad(actividad):
+    """
+    Clave técnica para evitar duplicados.
+    Si una misma actividad viene repetida 4 veces por la misma carga,
+    se queda solo una.
+    """
+    proveedor = valor_limpio(actividad.get("proveedor")).upper()
+    central = valor_limpio(actividad.get("central")).upper()
+
+    ot = valor_limpio(actividad.get("ot_grafo")) or obtener_columna_original(actividad, "C")
+    unidad = valor_limpio(actividad.get("unidad")) or obtener_columna_original(actividad, "E")
+    sistema = valor_limpio(actividad.get("sistema")) or obtener_columna_original(actividad, "F")
+    equipo = valor_limpio(actividad.get("equipo")) or obtener_columna_original(actividad, "G")
+    tipo_mant = valor_limpio(actividad.get("tipo_mant")) or obtener_columna_original(actividad, "K")
+    actividad_txt = valor_limpio(actividad.get("actividad")) or obtener_columna_original(actividad, "AF")
+
+    partes = [
+        proveedor,
+        central,
+        ot,
+        unidad,
+        sistema,
+        equipo,
+        tipo_mant,
+        actividad_txt,
+    ]
+
+    clave = " | ".join([normalizar_texto(p).upper() for p in partes])
+
+    clave = re.sub(r"\s+", " ", clave).strip()
+
+    return clave
+
+
+def quitar_duplicados_tecnicos(actividades):
+    """
+    Elimina duplicados exactos o técnicamente equivalentes.
+    """
+    vistos = set()
+    limpias = []
+
+    for a in actividades:
+        clave = clave_dedupe_actividad(a)
+
+        if clave in vistos:
+            continue
+
+        vistos.add(clave)
+        limpias.append(a)
+
+    return limpias
 
 
 def seleccionar_hoja(wb, central_norm):
@@ -538,8 +748,8 @@ def generar_programa_unico(
             f"Verifica que exista el archivo '{PLANTILLA_NOMBRE}' en el repo."
         )
 
-    archivos_map = consultar_archivos_semana(supabase, semana)
-    actividades = consultar_actividades(supabase, semana, central_norm)
+    archivos_map = consultar_archivos_semana(supabase, semana, central_norm)
+    actividades = consultar_actividades(supabase, semana, central_norm, archivos_map)
 
     wb = load_workbook(plantilla_path)
     ws = seleccionar_hoja(wb, central_norm)
