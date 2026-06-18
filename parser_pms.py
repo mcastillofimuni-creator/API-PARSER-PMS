@@ -1116,6 +1116,232 @@ def evaluar_ot_vs_aviso(ot_grafo, aviso, actividad, tipo_mant="", condicion=""):
     }
 
 
+
+# ============================================================
+# AUTOCOMPLETADO INTELIGENTE DE CONDICIÓN
+# ============================================================
+
+def inferir_condicion_cond(row):
+    """
+    Infere E/S o F/S solo para actividades tipo COND con condición vacía.
+
+    Regla conservadora:
+    - F/S: intervención física, falla/fuga/inoperativo, cambio/reemplazo/montaje.
+    - E/S: ajuste, revisión, evaluación, inspección, verificación, medición, calibración.
+    - Si no hay señal clara, no infiere.
+    """
+    tipo_mant = normalizar_texto(row.get("tipo_mant", ""))
+    condicion_actual = row.get("condicion", "")
+
+    if "cond" not in tipo_mant:
+        return ""
+
+    if not esta_vacio(condicion_actual):
+        return ""
+
+    texto = normalizar_texto(
+        " ".join([
+            convertir_a_str_seguro(row.get("motivo", "")),
+            convertir_a_str_seguro(row.get("sistema", "")),
+            convertir_a_str_seguro(row.get("equipo", "")),
+            convertir_a_str_seguro(row.get("observacion", "")),
+            convertir_a_str_seguro(row.get("texto_explicativo", "")),
+        ])
+    )
+
+    if not texto:
+        return ""
+
+    frases_fs = [
+        "fuera de servicio",
+        "fuga de aceite",
+        "fuga aceite",
+        "fuga de agua",
+        "fuga agua",
+        "fuga de aire",
+        "fuga aire",
+        "bajo nivel",
+        "baja presion",
+        "baja presión",
+        "no comunica",
+        "no responde",
+        "sin comunicacion",
+        "sin comunicación",
+        "cambio de",
+        "reemplazo de",
+        "desmontaje de",
+        "montaje de",
+        "intervencion de",
+        "intervención de",
+    ]
+
+    palabras_fs = {
+        "falla",
+        "fallo",
+        "inoperativo",
+        "fuga",
+        "filtracion",
+        "filtración",
+        "rotura",
+        "perdida",
+        "pérdida",
+        "trip",
+        "alarma",
+        "desgaste",
+        "cambio",
+        "reemplazo",
+        "montaje",
+        "desmontaje",
+        "intervencion",
+        "intervención",
+        "averia",
+        "avería",
+        "dañado",
+        "danado",
+        "corregir",
+        "correccion",
+        "corrección",
+    }
+
+    frases_es = [
+        "ajuste de",
+        "ajuste presion",
+        "ajuste presión",
+        "revision de",
+        "revisión de",
+        "evaluacion de",
+        "evaluación de",
+        "inspeccion de",
+        "inspección de",
+        "verificacion de",
+        "verificación de",
+        "medicion de",
+        "medición de",
+        "calibracion de",
+        "calibración de",
+        "prueba de",
+        "pruebas de",
+        "monitoreo de",
+    ]
+
+    palabras_es = {
+        "ajuste",
+        "revision",
+        "revisión",
+        "evaluacion",
+        "evaluación",
+        "inspeccion",
+        "inspección",
+        "verificacion",
+        "verificación",
+        "medicion",
+        "medición",
+        "calibracion",
+        "calibración",
+        "prueba",
+        "pruebas",
+        "monitoreo",
+        "diagnostico",
+        "diagnóstico",
+        "levantamiento",
+    }
+
+    tokens = set(texto.split())
+
+    score_fs = 0
+    score_es = 0
+
+    for frase in frases_fs:
+        if normalizar_texto(frase) in texto:
+            score_fs += 3
+
+    for palabra in palabras_fs:
+        if normalizar_texto(palabra) in tokens:
+            score_fs += 2
+
+    for frase in frases_es:
+        if normalizar_texto(frase) in texto:
+            score_es += 3
+
+    for palabra in palabras_es:
+        if normalizar_texto(palabra) in tokens:
+            score_es += 2
+
+    # Prioridad a F/S cuando hay señal física/correctiva clara.
+    if score_fs >= 2 and score_fs >= score_es:
+        return "F/S"
+
+    if score_es >= 2:
+        return "E/S"
+
+    return ""
+
+
+def actualizar_datos_originales_condicion(datos_originales, condicion_inferida):
+    """
+    Actualiza datos_originales para que el generador del PMS único copie la
+    condición inferida en la misma columna original, si esta fue detectada.
+    """
+    datos = json_seguro(datos_originales)
+
+    if not isinstance(datos, dict):
+        datos = {}
+
+    datos["condicion_inferida_por_parser"] = True
+
+    campos_detectados = datos.get("campos_detectados")
+    if not isinstance(campos_detectados, dict):
+        campos_detectados = {}
+        datos["campos_detectados"] = campos_detectados
+
+    condicion_original = campos_detectados.get("condicion")
+    if condicion_original in [None, ""]:
+        datos["condicion_original"] = condicion_original
+    else:
+        datos["condicion_original"] = condicion_original
+
+    campos_detectados["condicion"] = condicion_inferida
+
+    mapa_campos = datos.get("mapa_campos")
+    columnas_excel = datos.get("columnas_excel")
+
+    if isinstance(mapa_campos, dict) and isinstance(columnas_excel, dict):
+        info_condicion = mapa_campos.get("condicion")
+
+        if isinstance(info_condicion, dict):
+            col_letra = info_condicion.get("col_letra")
+
+            if col_letra:
+                columnas_excel[col_letra] = condicion_inferida
+
+    return datos
+
+
+def autocompletar_condiciones_cond(df):
+    """
+    Completa la columna condicion para actividades tipo COND cuando está vacía
+    y existe una inferencia clara. No genera observación; solo reduce ruido.
+    """
+    if df.empty or "condicion" not in df.columns or "tipo_mant" not in df.columns:
+        return df
+
+    df = df.copy()
+
+    for idx, row in df.iterrows():
+        condicion_inferida = inferir_condicion_cond(row)
+
+        if condicion_inferida:
+            df.at[idx, "condicion"] = condicion_inferida
+
+            if "datos_originales" in df.columns:
+                df.at[idx, "datos_originales"] = actualizar_datos_originales_condicion(
+                    row.get("datos_originales", {}),
+                    condicion_inferida,
+                )
+
+    return df
+
+
 def validar_riesgo(valor):
     v = txt_upper(valor)
 
@@ -1686,6 +1912,10 @@ def preparar_datos_parser(
     df_base_validable = df_base[
         df_base.apply(es_fila_actividad_real, axis=1)
     ].copy()
+
+    # Autocompleta condición E/S o F/S para actividades COND cuando el texto permite inferirlo.
+    # Esto reduce observaciones menores y permite que el PMS único salga más completo.
+    df_base_validable = autocompletar_condiciones_cond(df_base_validable)
 
     if df_base_validable.empty:
         detalle_observaciones = [{
