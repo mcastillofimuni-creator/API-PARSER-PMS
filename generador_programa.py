@@ -790,16 +790,16 @@ def generar_programa_unico(
 
     wb.save(salida_path)
 
-   numero_pms = obtener_numero_pms(semana)
+    numero_pms = obtener_numero_pms(semana)
 
-return {
-    "ok": True,
-    "archivo_generado": str(salida_path),
-    "nombre_archivo": salida_path.name,
-    "total_actividades": len(actividades),
-    "central": central_norm,
-    "central_label": CENTRAL_LABEL[central_norm],
-    "semana": semana,
-    "numero_pms": numero_pms,
-    "pms_label": f"PMS {numero_pms}",
-}
+    return {
+        "ok": True,
+        "archivo_generado": str(salida_path),
+        "nombre_archivo": salida_path.name,
+        "total_actividades": len(actividades),
+        "central": central_norm,
+        "central_label": CENTRAL_LABEL[central_norm],
+        "semana": semana,
+        "numero_pms": numero_pms,
+        "pms_label": f"PMS {numero_pms}",
+    }
