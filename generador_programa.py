@@ -732,8 +732,18 @@ def dejar_solo_hoja_objetivo(wb, ws_objetivo, central_norm):
 
 def parsear_fecha_para_excel(valor):
     """
-    Convierte fechas tipo '2026-06-22 00:00:00' o '2026-06-22'
-    a datetime/date para que Excel pueda mostrarlas como DD/MM/AAAA.
+    Convierte fechas de Supabase/Excel a fecha real para Excel.
+
+    Casos soportados:
+    - 2026-06-22
+    - 2026-06-22 00:00
+    - 2026-06-22 00:00:00
+    - 2026-06-22T00:00:00
+    - 2026-06-22T00:00:00+00:00
+    - 22/06/2026
+
+    Devuelve date cuando logra interpretar el valor. Así Excel puede mostrarlo
+    con number_format = "dd/mm/yyyy".
     """
     if valor is None:
         return None
@@ -741,16 +751,33 @@ def parsear_fecha_para_excel(valor):
     if isinstance(valor, datetime):
         return valor.date()
 
+    # Si ya llega como date desde openpyxl, tiene strftime pero no necesariamente
+    # es datetime. Evitamos importar date para no tocar más dependencias.
+    if hasattr(valor, "strftime") and not isinstance(valor, str):
+        try:
+            return valor
+        except Exception:
+            pass
+
     texto = normalizar_texto(valor)
 
     if not texto:
-        return valor
+        return None
+
+    texto_iso = texto.replace("Z", "+00:00")
+
+    try:
+        return datetime.fromisoformat(texto_iso).date()
+    except Exception:
+        pass
 
     formatos = [
+        "%Y-%m-%d %H:%M",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d",
         "%d/%m/%Y",
+        "%d/%m/%y",
     ]
 
     for fmt in formatos:
