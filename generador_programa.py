@@ -80,6 +80,18 @@ COLS_FALLBACK = {
 }
 
 
+# Orden prioritario solicitado para el consolidado.
+# Las empresas no listadas quedan debajo automáticamente.
+ORDEN_EMPRESAS = [
+    "MAGNEX",
+    "JMI",
+    "ULLOA",
+]
+
+UNIDADES_SANTA_ROSA_VALIDAS = {"COMUNES", "TG5", "TG6", "TG7", "TG8"}
+
+
+
 def normalizar_texto(valor):
     if valor is None:
         return ""
@@ -87,6 +99,132 @@ def normalizar_texto(valor):
     texto = str(valor).strip()
     texto = re.sub(r"\s+", " ", texto)
     return texto
+
+
+
+def quitar_acentos_basico(valor):
+    texto = normalizar_texto(valor)
+    reemplazos = {
+        "Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U", "Ü": "U", "Ñ": "N",
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n",
+    }
+
+    for a, b in reemplazos.items():
+        texto = texto.replace(a, b)
+
+    return texto
+
+
+def normalizar_empresa_consolidado(valor):
+    """
+    Normaliza nombres equivalentes de proveedor para ordenar y consolidar.
+
+    Regla solicitada:
+    - JMI y JM INGENIEROS se consideran la misma empresa: JMI.
+    """
+    empresa = quitar_acentos_basico(valor).upper()
+    empresa = re.sub(r"[^A-Z0-9 ]+", " ", empresa)
+    empresa = re.sub(r"\s+", " ", empresa).strip()
+
+    if not empresa:
+        return ""
+
+    if empresa == "JMI" or "JM INGENIEROS" in empresa or "JM INGENIERIA" in empresa:
+        return "JMI"
+
+    if "MAGNEX" in empresa:
+        return "MAGNEX"
+
+    if "ULLOA" in empresa:
+        return "ULLOA"
+
+    return empresa
+
+
+def clave_orden_empresa(actividad):
+    """
+    Ordena primero las empresas prioritarias y deja cualquier otra debajo.
+    """
+    proveedor = normalizar_empresa_consolidado(actividad.get("proveedor", ""))
+
+    prioridad = {
+        empresa: idx
+        for idx, empresa in enumerate(ORDEN_EMPRESAS, start=1)
+    }.get(proveedor, 999)
+
+    try:
+        fila_excel = int(actividad.get("fila_excel") or 0)
+    except Exception:
+        fila_excel = 0
+
+    actividad_txt = normalizar_texto(actividad.get("actividad", "")).upper()
+    ot = normalizar_texto(actividad.get("ot_grafo", "")).upper()
+
+    return (
+        prioridad,
+        proveedor,
+        fila_excel,
+        ot,
+        actividad_txt,
+    )
+
+
+def normalizar_unidad_santa_rosa(unidad, actividad=None):
+    """
+    Normaliza el campo GRUPO/UNIDAD para C. T. Santa Rosa.
+
+    Valores permitidos:
+    COMUNES, TG5, TG6, TG7, TG8.
+
+    Reglas:
+    - COMUNES PLANTA / PLANTA / ERM-* / BAJA / ALTA / SALA / CUBICULO -> COMUNES.
+    - UTI o unidad no estándar: si el texto menciona TG5/TG6/TG7/TG8, usa esa TG.
+      Si no hay TG clara, usa COMUNES.
+    """
+    unidad_txt = quitar_acentos_basico(unidad).upper()
+    unidad_txt = re.sub(r"\s+", " ", unidad_txt).strip()
+
+    partes = [unidad_txt]
+
+    if isinstance(actividad, dict):
+        for key in ["sistema", "equipo", "actividad", "motivo", "texto_explicativo", "observacion"]:
+            partes.append(quitar_acentos_basico(actividad.get(key, "")).upper())
+
+    texto_total = " ".join([p for p in partes if p])
+    texto_total = re.sub(r"\s+", " ", texto_total).strip()
+
+    for tg in ["TG5", "TG6", "TG7", "TG8"]:
+        if re.search(rf"\b{tg}\b", unidad_txt):
+            return tg
+
+    # Casos explícitos de comunes.
+    if (
+        not unidad_txt
+        or "COMUNES" in unidad_txt
+        or "COMUN" in unidad_txt
+        or "PLANTA" in unidad_txt
+        or unidad_txt.startswith("ERM")
+        or unidad_txt in {"BAJA", "ALTA", "SALA", "CUBICULO", "CUBÍCULO", "UTI"}
+    ):
+        # UTI suele requerir mirar el texto completo antes de mandarlo a COMUNES.
+        if unidad_txt == "UTI":
+            for tg in ["TG5", "TG6", "TG7", "TG8"]:
+                if re.search(rf"\b{tg}\b", texto_total):
+                    return tg
+
+        return "COMUNES"
+
+    # Si el proveedor puso algo no estándar pero el texto técnico contiene una TG,
+    # usamos esa TG. Esto ayuda con actividades tipo Black Start TG5/TG6.
+    for tg in ["TG5", "TG6", "TG7", "TG8"]:
+        if re.search(rf"\b{tg}\b", texto_total):
+            return tg
+
+    # Para Santa Rosa, si no es una unidad válida, se considera actividad común.
+    if unidad_txt not in UNIDADES_SANTA_ROSA_VALIDAS:
+        return "COMUNES"
+
+    return unidad_txt
 
 
 def normalizar_central(valor):
@@ -335,7 +473,7 @@ def consultar_archivos_semana(supabase, semana, central_norm):
         if central_archivo != central_norm:
             continue
 
-        proveedor = normalizar_texto(a.get("proveedor", "")).upper()
+        proveedor = normalizar_empresa_consolidado(a.get("proveedor", ""))
 
         if not proveedor:
             proveedor = f"SIN_PROVEEDOR_{a.get('id')}"
@@ -384,6 +522,10 @@ def consultar_actividades(supabase, semana, central_norm, archivos_vigentes):
     ]
 
     actividades = quitar_duplicados_tecnicos(actividades)
+
+    # Orden solicitado:
+    # MAGNEX, JMI, ULLOA y luego cualquier otra empresa debajo.
+    actividades = sorted(actividades, key=clave_orden_empresa)
 
     return actividades
 
@@ -489,7 +631,7 @@ def clave_dedupe_actividad(actividad):
     Si una misma actividad viene repetida 4 veces por la misma carga,
     se queda solo una.
     """
-    proveedor = valor_limpio(actividad.get("proveedor")).upper()
+    proveedor = normalizar_empresa_consolidado(actividad.get("proveedor", ""))
     central = valor_limpio(actividad.get("central")).upper()
 
     ot = valor_limpio(actividad.get("ot_grafo")) or obtener_columna_original(actividad, "C")
@@ -597,10 +739,11 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         default=archivo_info.get("proveedor", "") if archivo_info else "",
     )
 
-    # Si AD está vacío, ponemos proveedor.
+    # Normalizar empresa para el consolidado.
+    # JMI y JM INGENIEROS se muestran como JMI.
     col_empresa = COLS_FALLBACK["empresa"]
-    if ws[f"{col_empresa}{fila_destino}"].value in [None, ""]:
-        ws[f"{col_empresa}{fila_destino}"] = proveedor
+    proveedor_consolidado = normalizar_empresa_consolidado(proveedor)
+    ws[f"{col_empresa}{fila_destino}"] = proveedor_consolidado or proveedor
 
     # Forzar central normalizada en D para que el consolidado quede limpio.
     ws[f"{COLS_FALLBACK['central']}{fila_destino}"] = obtener_valor(
@@ -623,6 +766,15 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         COLS_FALLBACK["unidad"],
         "unidad",
     )
+
+    # Normalizar GRUPO/UNIDAD para C. T. Santa Rosa.
+    central_actual = normalizar_central(ws[f"{COLS_FALLBACK['central']}{fila_destino}"].value)
+    if central_actual == "SANTA ROSA":
+        unidad_actual = ws[f"{COLS_FALLBACK['unidad']}{fila_destino}"].value
+        ws[f"{COLS_FALLBACK['unidad']}{fila_destino}"] = normalizar_unidad_santa_rosa(
+            unidad_actual,
+            actividad,
+        )
 
     ws[f"{COLS_FALLBACK['sistema']}{fila_destino}"] = valor_original_o_fallback(
         actividad,
@@ -803,3 +955,4 @@ def generar_programa_unico(
         "numero_pms": numero_pms,
         "pms_label": f"PMS {numero_pms}",
     }
+
