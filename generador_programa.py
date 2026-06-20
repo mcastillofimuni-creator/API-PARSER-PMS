@@ -105,6 +105,49 @@ UNIDADES_SANTA_ROSA_VALIDAS = {"COMUNES", "TG5", "TG6", "TG7", "TG8"}
 
 
 
+# Catálogos usados para completar Tipo Mant y Condición en el consolidado.
+# Se aplican solo cuando el campo viene vacío o en formato largo.
+TIPOS_MANT_VALIDOS = {"PREV", "CORR", "PROY"}
+CONDICIONES_VALIDAS = {"E/S", "F/S"}
+
+PALABRAS_TIPO_CORR = [
+    "FALLA", "FALLO", "FUGA", "FILTRACION", "FILTRACIÓN", "INOPERATIVO",
+    "INOPERATIVA", "ALARMA", "TRIP", "ANOMAL", "ANORMAL", "DESGASTE",
+    "ROTURA", "PASE", "PERDIDA", "PÉRDIDA", "NO OPERA", "NO OPERATIVO",
+    "NO FUNCIONA", "NO RESPONDE", "DESHABILITADO", "DESHABILITADA",
+    "BLOQUEADO", "BLOQUEADA", "CORRECTIVO", "CORR",
+]
+
+PALABRAS_TIPO_PROY = [
+    "PROYECTO", "PROY", "IMPLEMENTACION", "IMPLEMENTACIÓN", "INSTALACION",
+    "INSTALACIÓN", "MONTAJE", "PUESTA EN MARCHA", "COMISIONAMIENTO",
+    "NUEVO", "NUEVA", "MEJORA", "MODIFICACION", "MODIFICACIÓN",
+    "AMPLIACION", "AMPLIACIÓN",
+]
+
+PALABRAS_TIPO_PREV = [
+    "PREVENTIVO", "PREV", "MANTTO", "MANTENIMIENTO", "MANTO", "INSPECCION",
+    "INSPECCIÓN", "REVISION", "REVISIÓN", "CALIBRACION", "CALIBRACIÓN",
+    "PRUEBA", "PRUEBAS", "LIMPIEZA", "LAVADO", "VERIFICACION",
+    "VERIFICACIÓN", "MEDICION", "MEDICIÓN", "ANALISIS", "ANÁLISIS",
+]
+
+PALABRAS_COND_FS = [
+    "FALLA", "FALLO", "FUGA", "FILTRACION", "FILTRACIÓN", "INOPERATIVO",
+    "INOPERATIVA", "CAMBIO", "REEMPLAZO", "DESMONTAJE", "MONTAJE",
+    "INTERVENCION", "INTERVENCIÓN", "DESGASTE", "ROTURA", "PASE",
+    "FUERA DE SERVICIO", "F/S", "FS", "BLOQUEADO", "BLOQUEADA",
+    "DESHABILITADO", "DESHABILITADA", "NO OPERA", "NO FUNCIONA",
+]
+
+PALABRAS_COND_ES = [
+    "AJUSTE", "REVISION", "REVISIÓN", "EVALUACION", "EVALUACIÓN",
+    "INSPECCION", "INSPECCIÓN", "VERIFICACION", "VERIFICACIÓN",
+    "MEDICION", "MEDICIÓN", "PRUEBA", "PRUEBAS", "LIMPIEZA",
+    "LAVADO", "CALIBRACION", "CALIBRACIÓN", "EN SERVICIO", "E/S", "ES",
+]
+
+
 def normalizar_texto(valor):
     if valor is None:
         return ""
@@ -238,6 +281,139 @@ def normalizar_unidad_santa_rosa(unidad, actividad=None):
         return "COMUNES"
 
     return unidad_txt
+
+
+def normalizar_tipo_mant(valor):
+    """
+    Normaliza Tipo Mant a biblioteca corta:
+    PREV, CORR o PROY.
+    """
+    texto = quitar_acentos_basico(valor).upper()
+    texto = re.sub(r"[^A-Z0-9/ ]+", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+
+    if not texto:
+        return ""
+
+    if texto in TIPOS_MANT_VALIDOS:
+        return texto
+
+    if texto.startswith("PREV") or "PREVENT" in texto or "MANTENIMIENTO PREVENTIVO" in texto:
+        return "PREV"
+
+    if texto.startswith("CORR") or "CORRECT" in texto:
+        return "CORR"
+
+    if texto.startswith("PROY") or "PROYECT" in texto:
+        return "PROY"
+
+    if "COND" in texto:
+        return "CORR"
+
+    return texto if texto in TIPOS_MANT_VALIDOS else ""
+
+
+def normalizar_condicion(valor):
+    """
+    Normaliza condición a E/S o F/S.
+    """
+    texto = quitar_acentos_basico(valor).upper()
+    texto = texto.replace(" ", "")
+    texto = texto.strip()
+
+    if not texto:
+        return ""
+
+    if texto in {"E/S", "ES", "ENSERVICIO", "SERVICIO"}:
+        return "E/S"
+
+    if texto in {"F/S", "FS", "FUERADESERVICIO", "FUERADE SERVICIO"}:
+        return "F/S"
+
+    return ""
+
+
+def texto_tecnico_actividad(actividad):
+    """
+    Junta campos técnicos útiles para inferir tipo de mantenimiento y condición.
+    """
+    if not isinstance(actividad, dict):
+        return ""
+
+    partes = []
+    for key in [
+        "actividad", "motivo", "sistema", "equipo", "unidad", "tipo_mant",
+        "condicion", "area_solicitante", "observacion", "texto_explicativo",
+    ]:
+        partes.append(quitar_acentos_basico(actividad.get(key, "")).upper())
+
+    # También mirar campos detectados por si el parser los guardó allí.
+    campos = obtener_campos_detectados(actividad)
+    if isinstance(campos, dict):
+        for key in ["actividad", "motivo", "sistema", "equipo", "unidad", "tipo_mant", "condicion"]:
+            partes.append(quitar_acentos_basico(campos.get(key, "")).upper())
+
+    texto = " ".join([p for p in partes if p])
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto
+
+
+def contiene_patron(texto, patrones):
+    texto = quitar_acentos_basico(texto).upper()
+    texto = re.sub(r"\s+", " ", texto).strip()
+
+    for patron in patrones:
+        patron_norm = quitar_acentos_basico(patron).upper()
+        if patron_norm in texto:
+            return True
+
+    return False
+
+
+def inferir_tipo_mant(actividad, valor_actual=""):
+    """
+    Si el tipo viene vacío, lo infiere en forma conservadora.
+    Prioridad:
+    - PROY para implementación/instalación/montaje/proyecto.
+    - CORR para falla/fuga/inoperativo/alarma/desgaste.
+    - PREV para mantto/inspección/revisión/pruebas/limpieza.
+    """
+    tipo_norm = normalizar_tipo_mant(valor_actual)
+    if tipo_norm in TIPOS_MANT_VALIDOS:
+        return tipo_norm
+
+    texto = texto_tecnico_actividad(actividad)
+
+    if contiene_patron(texto, PALABRAS_TIPO_PROY):
+        return "PROY"
+
+    if contiene_patron(texto, PALABRAS_TIPO_CORR):
+        return "CORR"
+
+    if contiene_patron(texto, PALABRAS_TIPO_PREV):
+        return "PREV"
+
+    return tipo_norm or valor_actual
+
+
+def inferir_condicion(actividad, valor_actual=""):
+    """
+    Si condición viene vacía, infiere E/S o F/S.
+    No sobrescribe E/S o F/S existentes.
+    """
+    cond_norm = normalizar_condicion(valor_actual)
+    if cond_norm in CONDICIONES_VALIDAS:
+        return cond_norm
+
+    texto = texto_tecnico_actividad(actividad)
+
+    if contiene_patron(texto, PALABRAS_COND_FS):
+        return "F/S"
+
+    if contiene_patron(texto, PALABRAS_COND_ES):
+        return "E/S"
+
+    return cond_norm or valor_actual
 
 
 def normalizar_central(valor):
@@ -924,6 +1100,21 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         "condicion",
     )
 
+    # Completar bibliotecas del consolidado:
+    # Tipo Mant: PREV / CORR / PROY.
+    # Condición: E/S / F/S.
+    tipo_actual = ws[f"{COLS_FALLBACK['tipo_mant']}{fila_destino}"].value
+    condicion_actual = ws[f"{COLS_FALLBACK['condicion']}{fila_destino}"].value
+
+    tipo_inferido = inferir_tipo_mant(actividad, tipo_actual)
+    condicion_inferida = inferir_condicion(actividad, condicion_actual)
+
+    if tipo_inferido:
+        ws[f"{COLS_FALLBACK['tipo_mant']}{fila_destino}"] = tipo_inferido
+
+    if condicion_inferida:
+        ws[f"{COLS_FALLBACK['condicion']}{fila_destino}"] = condicion_inferida
+
     ws[f"{COLS_FALLBACK['riesgo']}{fila_destino}"] = valor_original_o_fallback(
         actividad,
         columnas_originales,
@@ -1077,3 +1268,4 @@ def generar_programa_unico(
         "numero_pms": numero_pms,
         "pms_label": f"PMS {numero_pms}",
     }
+
