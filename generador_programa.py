@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 
@@ -48,6 +49,18 @@ MESES = {
 }
 
 DIAS_CORTOS = ["SÁB", "DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE"]
+
+# Columnas de programación dentro de la plantilla.
+# U/V son Inicio/Fin y W:AC son Sáb-Vie.
+COL_INICIO_PROG = "U"
+COL_FIN_PROG = "V"
+COL_DIAS_SEMANA = ["W", "X", "Y", "Z", "AA", "AB", "AC"]
+
+# Colores de resaltado usados por el consolidado.
+# Amarillo: fila con Riesgo Crítico = X. Azul: celda de día programado.
+FILL_RIESGO_CRITICO = PatternFill(fill_type="solid", fgColor="FFFF00")
+FILL_DIA_PROGRAMADO = PatternFill(fill_type="solid", fgColor="44546A")
+FONT_DIA_PROGRAMADO = Font(color="FFFFFF", bold=True)
 
 # Rango de columnas que se copiará desde datos_originales.columnas_excel.
 # Según tu plantilla, el cuerpo relevante empieza en C y llega hasta AU.
@@ -411,7 +424,7 @@ def actualizar_encabezado_semana(ws, semana_inicio):
 
     # Buscar encabezados de días en el rango W:AC, pero sin asumir demasiado.
     # Si la plantilla tiene esos campos, los actualizamos.
-    day_cols = ["W", "X", "Y", "Z", "AA", "AB", "AC"]
+    day_cols = COL_DIAS_SEMANA
 
     for i, col in enumerate(day_cols):
         fecha = semana_inicio + timedelta(days=i)
@@ -716,6 +729,86 @@ def dejar_solo_hoja_objetivo(wb, ws_objetivo, central_norm):
             wb.remove(ws)
 
 
+
+def parsear_fecha_para_excel(valor):
+    """
+    Convierte fechas tipo '2026-06-22 00:00:00' o '2026-06-22'
+    a datetime/date para que Excel pueda mostrarlas como DD/MM/AAAA.
+    """
+    if valor is None:
+        return None
+
+    if isinstance(valor, datetime):
+        return valor.date()
+
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return valor
+
+    formatos = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+    ]
+
+    for fmt in formatos:
+        try:
+            return datetime.strptime(texto, fmt).date()
+        except Exception:
+            pass
+
+    return valor
+
+
+def valor_marca_dia(valor):
+    """
+    Determina si una celda de día debe resaltarse.
+    Ejemplos válidos: 1, 2, 3, '2', 'x'.
+    """
+    if valor is None:
+        return False
+
+    texto = normalizar_texto(valor)
+    if texto.upper() in ["", "NULL", "NONE", "NAN", "EMPTY", "-", "--", "0"]:
+        return False
+
+    return True
+
+
+def aplicar_formato_final_fila(ws, fila):
+    """
+    Ajustes finales después de copiar la fila original:
+    - Inicio y Fin en formato DD/MM/AAAA.
+    - Celdas de días programados con relleno azul.
+    - Si Riesgo Crítico = X, resalta toda la fila en amarillo.
+    """
+    col_inicio = column_index_from_string(COL_INICIO_DATOS)
+    col_fin = column_index_from_string(COL_FIN_DATOS)
+
+    # 1) Fechas Inicio/Fin.
+    for col in [COL_INICIO_PROG, COL_FIN_PROG]:
+        celda = ws[f"{col}{fila}"]
+        celda.value = parsear_fecha_para_excel(celda.value)
+        if celda.value not in [None, ""]:
+            celda.number_format = "dd/mm/yyyy"
+
+    # 2) Riesgo crítico: si M tiene X, pintar toda la fila en amarillo.
+    riesgo = normalizar_texto(ws[f"{COLS_FALLBACK['riesgo']}{fila}"].value).upper()
+    riesgo_critico = bool(re.search(r"\bX\b", riesgo))
+
+    if riesgo_critico:
+        for col_idx in range(col_inicio, col_fin + 1):
+            ws.cell(row=fila, column=col_idx).fill = copy(FILL_RIESGO_CRITICO)
+
+    # 3) Marcas de programación diaria: mantenerlas azules, incluso si la fila es amarilla.
+    for col in COL_DIAS_SEMANA:
+        celda = ws[f"{col}{fila}"]
+        if valor_marca_dia(celda.value):
+            celda.fill = copy(FILL_DIA_PROGRAMADO)
+            celda.font = copy(FONT_DIA_PROGRAMADO)
+
 def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
     """
     Escribe una fila consolidada copiando el rango C:AU desde datos_originales.columnas_excel.
@@ -833,6 +926,8 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         "actividad",
         "motivo",
     )
+
+    aplicar_formato_final_fila(ws, fila_destino)
 
 
 def preparar_filas_destino(ws, total_actividades):
@@ -955,4 +1050,3 @@ def generar_programa_unico(
         "numero_pms": numero_pms,
         "pms_label": f"PMS {numero_pms}",
     }
-
