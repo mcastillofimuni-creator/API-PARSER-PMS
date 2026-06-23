@@ -105,47 +105,96 @@ UNIDADES_SANTA_ROSA_VALIDAS = {"COMUNES", "TG5", "TG6", "TG7", "TG8"}
 
 
 
-# Catálogos usados para completar Tipo Mant y Condición en el consolidado.
-# Se aplican solo cuando el campo viene vacío o en formato largo.
+# Catálogos normalizados para el consolidado.
+# Se usan como una capa de criterio humano antes de escribir el PMS único.
+AREAS_VALIDAS = {"MANTENIMIENTO", "OPERACIONES", "HSE&Q"}
 TIPOS_MANT_VALIDOS = {"PREV", "CORR", "PROY"}
 CONDICIONES_VALIDAS = {"E/S", "F/S"}
 
-PALABRAS_TIPO_CORR = [
-    "FALLA", "FALLO", "FUGA", "FILTRACION", "FILTRACIÓN", "INOPERATIVO",
-    "INOPERATIVA", "ALARMA", "TRIP", "ANOMAL", "ANORMAL", "DESGASTE",
-    "ROTURA", "PASE", "PERDIDA", "PÉRDIDA", "NO OPERA", "NO OPERATIVO",
-    "NO FUNCIONA", "NO RESPONDE", "DESHABILITADO", "DESHABILITADA",
-    "BLOQUEADO", "BLOQUEADA", "CORRECTIVO", "CORR",
-]
+PROVEEDORES_HSEQ = {
+    "ULLOA",
+    "SGS",
+    "LENOR",
+}
 
-PALABRAS_TIPO_PROY = [
-    "PROYECTO", "PROY", "IMPLEMENTACION", "IMPLEMENTACIÓN", "INSTALACION",
-    "INSTALACIÓN", "MONTAJE", "PUESTA EN MARCHA", "COMISIONAMIENTO",
-    "NUEVO", "NUEVA", "MEJORA", "MODIFICACION", "MODIFICACIÓN",
-    "AMPLIACION", "AMPLIACIÓN",
-]
+INSPECTOR_OPERACIONES = "Y.ESPINOZA"
 
-PALABRAS_TIPO_PREV = [
-    "PREVENTIVO", "PREV", "MANTTO", "MANTENIMIENTO", "MANTO", "INSPECCION",
-    "INSPECCIÓN", "REVISION", "REVISIÓN", "CALIBRACION", "CALIBRACIÓN",
-    "PRUEBA", "PRUEBAS", "LIMPIEZA", "LAVADO", "VERIFICACION",
-    "VERIFICACIÓN", "MEDICION", "MEDICIÓN", "ANALISIS", "ANÁLISIS",
-]
+INSPECTORES = {
+    "SANTA ROSA": {
+        "MECANICA": ["C.LUQUE", "J.CACERES"],
+        "ELECTRICIDAD": ["M.CASTILLO", "R.SANDOVAL"],
+        "IC": ["P.GARCIA", "C.HUAYNATE", "M.TASAYCO"],
+    },
+    "VENTANILLA": {
+        "MECANICA": ["F.CASTRO", "D.HINOSTROZA", "F.ROJAS"],
+        "ELECTRICIDAD": ["F.SARMIENTO", "E.SALINAS"],
+        "IC": ["C.ESPINOZA", "M.GOMEZ", "V.ESPIRITU"],
+    },
+}
 
-PALABRAS_COND_FS = [
-    "FALLA", "FALLO", "FUGA", "FILTRACION", "FILTRACIÓN", "INOPERATIVO",
-    "INOPERATIVA", "CAMBIO", "REEMPLAZO", "DESMONTAJE", "MONTAJE",
-    "INTERVENCION", "INTERVENCIÓN", "DESGASTE", "ROTURA", "PASE",
-    "FUERA DE SERVICIO", "F/S", "FS", "BLOQUEADO", "BLOQUEADA",
-    "DESHABILITADO", "DESHABILITADA", "NO OPERA", "NO FUNCIONA",
-]
-
-PALABRAS_COND_ES = [
-    "AJUSTE", "REVISION", "REVISIÓN", "EVALUACION", "EVALUACIÓN",
-    "INSPECCION", "INSPECCIÓN", "VERIFICACION", "VERIFICACIÓN",
-    "MEDICION", "MEDICIÓN", "PRUEBA", "PRUEBAS", "LIMPIEZA",
-    "LAVADO", "CALIBRACION", "CALIBRACIÓN", "EN SERVICIO", "E/S", "ES",
-]
+ALIAS_INSPECTORES = {
+    # Santa Rosa - Mecánica
+    "CARLOS LUQUE": "C.LUQUE",
+    "C LUQUE": "C.LUQUE",
+    "C.LUQUE": "C.LUQUE",
+    "JULIO CACERES": "J.CACERES",
+    "JULIO CÁCERES": "J.CACERES",
+    "J CACERES": "J.CACERES",
+    "J.CACERES": "J.CACERES",
+    # Santa Rosa - Electricidad
+    "MANUEL CASTILLO": "M.CASTILLO",
+    "M CASTILLO": "M.CASTILLO",
+    "M.CASTILLO": "M.CASTILLO",
+    "RICHARD SANDOVAL": "R.SANDOVAL",
+    "R SANDOVAL": "R.SANDOVAL",
+    "R.SANDOVAL": "R.SANDOVAL",
+    # Santa Rosa - I&C
+    "PERCY GARCIA": "P.GARCIA",
+    "PERCY GARCÍA": "P.GARCIA",
+    "P GARCIA": "P.GARCIA",
+    "P.GARCIA": "P.GARCIA",
+    "CESAR HUAYNATE": "C.HUAYNATE",
+    "CÉSAR HUAYNATE": "C.HUAYNATE",
+    "C HUAYNATE": "C.HUAYNATE",
+    "C.HUAYNATE": "C.HUAYNATE",
+    "MIGUEL TASAYCO": "M.TASAYCO",
+    "M TASAYCO": "M.TASAYCO",
+    "M.TASAYCO": "M.TASAYCO",
+    # Ventanilla - Mecánica
+    "FIDEL CASTRO": "F.CASTRO",
+    "F CASTRO": "F.CASTRO",
+    "F.CASTRO": "F.CASTRO",
+    "DANIEL HINOSTROZA": "D.HINOSTROZA",
+    "D HINOSTROZA": "D.HINOSTROZA",
+    "D.HINOSTROZA": "D.HINOSTROZA",
+    "FARID ROJAS": "F.ROJAS",
+    "F ROJAS": "F.ROJAS",
+    "F.ROJAS": "F.ROJAS",
+    # Ventanilla - Electricidad
+    "FERNANDO SARMIENTO": "F.SARMIENTO",
+    "F SARMIENTO": "F.SARMIENTO",
+    "F.SARMIENTO": "F.SARMIENTO",
+    "EDUARDO SALINAS": "E.SALINAS",
+    "E SALINAS": "E.SALINAS",
+    "E.SALINAS": "E.SALINAS",
+    # Ventanilla - I&C
+    "CESAR ESPINOZA": "C.ESPINOZA",
+    "CÉSAR ESPINOZA": "C.ESPINOZA",
+    "C ESPINOZA": "C.ESPINOZA",
+    "C.ESPINOZA": "C.ESPINOZA",
+    "MIGUEL GOMEZ": "M.GOMEZ",
+    "MIGUEL GÓMEZ": "M.GOMEZ",
+    "M GOMEZ": "M.GOMEZ",
+    "M.GOMEZ": "M.GOMEZ",
+    "VICTOR ESPIRITU": "V.ESPIRITU",
+    "VÍCTOR ESPÍRITU": "V.ESPIRITU",
+    "V ESPIRITU": "V.ESPIRITU",
+    "V.ESPIRITU": "V.ESPIRITU",
+    # Operaciones
+    "YERICO ESPINOZA": INSPECTOR_OPERACIONES,
+    "Y ESPINOZA": INSPECTOR_OPERACIONES,
+    "Y.ESPINOZA": INSPECTOR_OPERACIONES,
+}
 
 
 def normalizar_texto(valor):
@@ -281,139 +330,6 @@ def normalizar_unidad_santa_rosa(unidad, actividad=None):
         return "COMUNES"
 
     return unidad_txt
-
-
-def normalizar_tipo_mant(valor):
-    """
-    Normaliza Tipo Mant a biblioteca corta:
-    PREV, CORR o PROY.
-    """
-    texto = quitar_acentos_basico(valor).upper()
-    texto = re.sub(r"[^A-Z0-9/ ]+", " ", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-
-    if not texto:
-        return ""
-
-    if texto in TIPOS_MANT_VALIDOS:
-        return texto
-
-    if texto.startswith("PREV") or "PREVENT" in texto or "MANTENIMIENTO PREVENTIVO" in texto:
-        return "PREV"
-
-    if texto.startswith("CORR") or "CORRECT" in texto:
-        return "CORR"
-
-    if texto.startswith("PROY") or "PROYECT" in texto:
-        return "PROY"
-
-    if "COND" in texto:
-        return "CORR"
-
-    return texto if texto in TIPOS_MANT_VALIDOS else ""
-
-
-def normalizar_condicion(valor):
-    """
-    Normaliza condición a E/S o F/S.
-    """
-    texto = quitar_acentos_basico(valor).upper()
-    texto = texto.replace(" ", "")
-    texto = texto.strip()
-
-    if not texto:
-        return ""
-
-    if texto in {"E/S", "ES", "ENSERVICIO", "SERVICIO"}:
-        return "E/S"
-
-    if texto in {"F/S", "FS", "FUERADESERVICIO", "FUERADE SERVICIO"}:
-        return "F/S"
-
-    return ""
-
-
-def texto_tecnico_actividad(actividad):
-    """
-    Junta campos técnicos útiles para inferir tipo de mantenimiento y condición.
-    """
-    if not isinstance(actividad, dict):
-        return ""
-
-    partes = []
-    for key in [
-        "actividad", "motivo", "sistema", "equipo", "unidad", "tipo_mant",
-        "condicion", "area_solicitante", "observacion", "texto_explicativo",
-    ]:
-        partes.append(quitar_acentos_basico(actividad.get(key, "")).upper())
-
-    # También mirar campos detectados por si el parser los guardó allí.
-    campos = obtener_campos_detectados(actividad)
-    if isinstance(campos, dict):
-        for key in ["actividad", "motivo", "sistema", "equipo", "unidad", "tipo_mant", "condicion"]:
-            partes.append(quitar_acentos_basico(campos.get(key, "")).upper())
-
-    texto = " ".join([p for p in partes if p])
-    texto = re.sub(r"\s+", " ", texto).strip()
-    return texto
-
-
-def contiene_patron(texto, patrones):
-    texto = quitar_acentos_basico(texto).upper()
-    texto = re.sub(r"\s+", " ", texto).strip()
-
-    for patron in patrones:
-        patron_norm = quitar_acentos_basico(patron).upper()
-        if patron_norm in texto:
-            return True
-
-    return False
-
-
-def inferir_tipo_mant(actividad, valor_actual=""):
-    """
-    Si el tipo viene vacío, lo infiere en forma conservadora.
-    Prioridad:
-    - PROY para implementación/instalación/montaje/proyecto.
-    - CORR para falla/fuga/inoperativo/alarma/desgaste.
-    - PREV para mantto/inspección/revisión/pruebas/limpieza.
-    """
-    tipo_norm = normalizar_tipo_mant(valor_actual)
-    if tipo_norm in TIPOS_MANT_VALIDOS:
-        return tipo_norm
-
-    texto = texto_tecnico_actividad(actividad)
-
-    if contiene_patron(texto, PALABRAS_TIPO_PROY):
-        return "PROY"
-
-    if contiene_patron(texto, PALABRAS_TIPO_CORR):
-        return "CORR"
-
-    if contiene_patron(texto, PALABRAS_TIPO_PREV):
-        return "PREV"
-
-    return tipo_norm or valor_actual
-
-
-def inferir_condicion(actividad, valor_actual=""):
-    """
-    Si condición viene vacía, infiere E/S o F/S.
-    No sobrescribe E/S o F/S existentes.
-    """
-    cond_norm = normalizar_condicion(valor_actual)
-    if cond_norm in CONDICIONES_VALIDAS:
-        return cond_norm
-
-    texto = texto_tecnico_actividad(actividad)
-
-    if contiene_patron(texto, PALABRAS_COND_FS):
-        return "F/S"
-
-    if contiene_patron(texto, PALABRAS_COND_ES):
-        return "E/S"
-
-    return cond_norm or valor_actual
 
 
 def normalizar_central(valor):
@@ -906,20 +822,318 @@ def dejar_solo_hoja_objetivo(wb, ws_objetivo, central_norm):
 
 
 
+
+def texto_base_actividad(actividad=None, *extras):
+    """
+    Junta la información disponible de la fila para inferir tipo, condición,
+    área e inspector sin depender de una sola columna.
+    """
+    partes = []
+
+    if isinstance(actividad, dict):
+        for key in [
+            "ot_grafo", "central", "unidad", "sistema", "equipo",
+            "cod_pm_aviso", "pedido", "motivo", "actividad", "tipo_mant",
+            "condicion", "riesgo", "area_solicitante", "inspector",
+            "rt_terceros", "recursos", "texto_explicativo", "observacion",
+        ]:
+            partes.append(quitar_acentos_basico(actividad.get(key, "")).upper())
+
+    for extra in extras:
+        partes.append(quitar_acentos_basico(extra).upper())
+
+    texto = " ".join([p for p in partes if p])
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto
+
+
+def contiene_patron(texto, patrones):
+    texto = quitar_acentos_basico(texto).upper()
+    return any(re.search(p, texto) for p in patrones)
+
+
+def normalizar_tipo_mant(valor, actividad=None, contexto_extra=""):
+    """
+    Normaliza TIPO MANT a PREV, CORR o PROY.
+    Si el proveedor dejó el campo vacío o escribió un texto largo, se infiere
+    por descripción de actividad/sistema/equipo.
+    """
+    actual = quitar_acentos_basico(valor).upper().strip()
+    actual = re.sub(r"[^A-Z0-9/ ]+", " ", actual)
+    actual = re.sub(r"\s+", " ", actual).strip()
+
+    if actual in TIPOS_MANT_VALIDOS:
+        return actual
+
+    if actual in {"PREVENTIVO", "M1", "PM", "P M", "MANTO PREVENTIVO", "MANTTO PREVENTIVO"}:
+        return "PREV"
+
+    if actual in {"CORRECTIVO", "COND", "CONDICIONAL", "M2", "CM", "C M"}:
+        return "CORR"
+
+    if actual in {"PROYECTO", "PROYECTOS", "M3", "M4", "OBRA"}:
+        return "PROY"
+
+    texto = texto_base_actividad(actividad, contexto_extra, actual)
+
+    patrones_proy = [
+        r"\bPROY(ECTO)?\b", r"\bIMPLEMENTACION\b", r"\bIMPLEMENTAR\b",
+        r"\bINSTALACION\b", r"\bINSTALAR\b", r"\bMONTAJE\b",
+        r"\bNUEVO\b", r"\bNUEVA\b", r"\bOBRA\b", r"\bAMPLIACION\b",
+        r"\bMODIFICACION\b", r"\bMEJORA\b", r"\bUPGRADE\b", r"\bCOMISIONAMIENTO\b",
+    ]
+
+    patrones_corr = [
+        r"\bFALLA\b", r"\bFALLO\b", r"\bAVERIA\b", r"\bINOPERATIVO\b",
+        r"\bINOPERATIVA\b", r"\bALARMA\b", r"\bFUGA\b", r"\bFILTRACION\b",
+        r"\bPERDIDA\b", r"\bDESGASTE\b", r"\bROTURA\b", r"\bRUIDO\b",
+        r"\bPASE\b", r"\bBAJA PRESION\b", r"\bBAJO NIVEL\b", r"\bTRIP\b",
+        r"\bCORRECTIVO\b", r"\bREPARACION\b", r"\bREPARAR\b", r"\bREEMPLAZO\b",
+        r"\bCAMBIO\b", r"\bCONTROL DESHABILITADO\b", r"\bNO OPERA\b",
+    ]
+
+    patrones_prev = [
+        r"\bMANTTO\b", r"\bMANTO\b", r"\bMANTENIMIENTO\b", r"\bPREVENTIVO\b",
+        r"\bINSPECCION\b", r"\bREVISION\b", r"\bVERIFICACION\b", r"\bPRUEBA\b",
+        r"\bPRUEBAS\b", r"\bLIMPIEZA\b", r"\bCALIBRACION\b", r"\bMEDICION\b",
+        r"\bLAVADO\b", r"\bANUAL\b", r"\bRUTINARIO\b", r"\bMONITOREO\b",
+        r"\bTERMOGRAFIA\b", r"\bANALISIS\b",
+    ]
+
+    # Si hay palabras de proyecto explícitas, se considera proyecto salvo que el texto indique falla clara.
+    if contiene_patron(texto, patrones_proy) and not contiene_patron(texto, patrones_corr):
+        return "PROY"
+
+    if contiene_patron(texto, patrones_corr):
+        return "CORR"
+
+    if contiene_patron(texto, patrones_proy):
+        return "PROY"
+
+    if contiene_patron(texto, patrones_prev):
+        return "PREV"
+
+    return actual if actual else "PREV"
+
+
+def normalizar_condicion(valor, actividad=None, tipo_mant="", contexto_extra=""):
+    """
+    Normaliza CONDICIÓN a E/S o F/S.
+    Respeta E/S y F/S si ya vienen correctamente.
+    """
+    actual = quitar_acentos_basico(valor).upper().strip()
+    actual = actual.replace(" ", "")
+
+    if actual in {"E/S", "ES", "E.S", "ENSERVICIO"}:
+        return "E/S"
+
+    if actual in {"F/S", "FS", "F.S", "FUERADESERVICIO"}:
+        return "F/S"
+
+    texto = texto_base_actividad(actividad, contexto_extra, tipo_mant, valor)
+
+    patrones_fs = [
+        r"\bFALLA\b", r"\bFUGA\b", r"\bFILTRACION\b", r"\bINOPERATIVO\b",
+        r"\bINOPERATIVA\b", r"\bDESHABILITADO\b", r"\bDESHABILITADA\b",
+        r"\bBLOQUEADO\b", r"\bBLOQUEADA\b", r"\bNO OPERA\b", r"\bCAMBIO\b",
+        r"\bREEMPLAZO\b", r"\bDESMONTAJE\b", r"\bMONTAJE\b", r"\bINTERVENCION\b",
+        r"\bLAVADO DE IGV\b", r"\bLAVADO MANUAL DE IGV\b", r"\bACOPLE\b",
+        r"\bCORRECTIVO\b", r"\bCORR\b", r"\bPUESTA EN MARCHA\b",
+    ]
+
+    patrones_es = [
+        r"\bAJUSTE\b", r"\bREVISION\b", r"\bEVALUACION\b", r"\bINSPECCION\b",
+        r"\bVERIFICACION\b", r"\bMEDICION\b", r"\bMONITOREO\b", r"\bTERMOGRAFIA\b",
+        r"\bANALISIS\b", r"\bPRUEBA FUNCIONAL\b", r"\bCALIBRACION\b",
+    ]
+
+    if contiene_patron(texto, patrones_fs):
+        return "F/S"
+
+    if contiene_patron(texto, patrones_es):
+        return "E/S"
+
+    tipo = quitar_acentos_basico(tipo_mant).upper()
+    if tipo == "CORR":
+        return "F/S"
+
+    return "E/S"
+
+
+def normalizar_area_solicitante(valor, actividad=None, proveedor=""):
+    """
+    Normaliza ÁREA SOLICITANTE a MANTENIMIENTO, OPERACIONES o HSE&Q.
+    Usa proveedor y texto de actividad para detectar HSE&Q.
+    """
+    actual = quitar_acentos_basico(valor).upper().strip()
+    actual = re.sub(r"[^A-Z0-9& ]+", " ", actual)
+    actual = re.sub(r"\s+", " ", actual).strip()
+
+    texto = texto_base_actividad(actividad, proveedor, actual)
+    proveedor_norm = normalizar_empresa_consolidado(proveedor)
+
+    if "OPERACION" in actual or "OPERACIONES" in actual or contiene_patron(texto, [r"\bOPERACIONES\b"]):
+        return "OPERACIONES"
+
+    patrones_hseq = [
+        r"\bHSE\b", r"\bHSEQ\b", r"\bHSE&Q\b", r"\bSSOMA\b", r"\bSOMA\b",
+        r"\bSEGURIDAD\b", r"\bSALUD\b", r"\bAMBIENTAL\b", r"\bAMBIENTE\b",
+        r"\bMEDICO\b", r"\bMEDICA\b", r"\bERGONOMIA\b", r"\bERGONOMICO\b",
+        r"\bRESIDUO\b", r"\bRESIDUOS\b", r"\bSOLIDOS\b", r"\bMONITOR(EO)? AMBIENTAL\b",
+        r"\bMONITORES AMBIENTALES\b", r"\bRECOJO\b", r"\bDISPOSICION\b",
+    ]
+
+    if proveedor_norm in PROVEEDORES_HSEQ or contiene_patron(texto, patrones_hseq):
+        return "HSE&Q"
+
+    if "MANT" in actual or "MANTENIMIENTO" in actual:
+        return "MANTENIMIENTO"
+
+    return "MANTENIMIENTO"
+
+
+def normalizar_inspector_existente(valor):
+    inspector = quitar_acentos_basico(valor).upper().strip()
+    inspector = re.sub(r"[^A-Z0-9./ ]+", " ", inspector)
+    inspector = re.sub(r"\s+", " ", inspector).strip()
+
+    if not inspector:
+        return ""
+
+    # Si vienen varios inspectores separados por '/', normaliza los que reconozca.
+    partes = [p.strip() for p in re.split(r"/|,|;| Y ", inspector) if p.strip()]
+    normalizados = []
+
+    for parte in partes:
+        parte_norm = parte.replace(" ", "") if "." in parte else parte
+        candidato = ALIAS_INSPECTORES.get(parte) or ALIAS_INSPECTORES.get(parte_norm)
+        if candidato and candidato not in normalizados:
+            normalizados.append(candidato)
+
+    if normalizados:
+        return " / ".join(normalizados)
+
+    return ""
+
+
+def detectar_disciplina(actividad=None, contexto_extra=""):
+    texto = texto_base_actividad(actividad, contexto_extra)
+
+    patrones_ic = [
+        r"\bINSTRUMENT", r"\bCONTROL\b", r"\bPLC\b", r"\bDCS\b", r"\bSCADA\b",
+        r"\bRTU\b", r"\bTRANSMISOR\b", r"\bSENSOR\b", r"\bSWITCH\b", r"\bVALVULA DE CONTROL\b",
+        r"\bVALVULA SOLENOIDE\b", r"\bPRESION\b", r"\bTEMPERATURA\b", r"\bCAUDAL\b",
+        r"\bVIBRACION\b", r"\bPOSICION\b", r"\bACTUADOR\b", r"\bCONVERTIDOR\b",
+    ]
+
+    patrones_elec = [
+        r"\bELECT", r"\bGENERADOR\b", r"\bTRANSFORMADOR\b", r"\bTRAFO\b",
+        r"\bTABLERO\b", r"\bBREAKER\b", r"\bINTERRUPTOR\b", r"\bRELE\b", r"\bPROTECCION\b",
+        r"\bUPS\b", r"\bBATERIA\b", r"\bCARGADOR\b", r"\bVARIADOR\b", r"\bEXCITACION\b",
+        r"\bMOTOR ELECTRICO\b", r"\bMOTOR MT\b", r"\bMCC\b", r"\bCABLE\b", r"\bLUMINARIA\b",
+        r"\bILUMINACION\b", r"\bPANEL SOLAR\b", r"\bPANELES SOLARES\b",
+    ]
+
+    patrones_mec = [
+        r"\bMECAN", r"\bBOMBA\b", r"\bCOMPRESOR", r"\bVALVULA\b", r"\bFILTRO\b",
+        r"\bTUBERIA\b", r"\bSKID\b", r"\bMOTOR DIESEL\b", r"\bIGV\b", r"\bLAVADO\b",
+        r"\bGRUA\b", r"\bACOPLE\b", r"\bRODAMIENTO\b", r"\bREDUCTOR\b", r"\bLUBRICACION\b",
+        r"\bACEITE\b", r"\bFUGA\b", r"\bENFRIAMIENTO\b", r"\bCALDERIN\b",
+    ]
+
+    # Prioridad: I&C para control/instrumentación; electricidad para equipos eléctricos;
+    # mecánica al final para no capturar 'válvula de control' como mecánica.
+    if contiene_patron(texto, patrones_ic):
+        return "IC"
+    if contiene_patron(texto, patrones_elec):
+        return "ELECTRICIDAD"
+    if contiene_patron(texto, patrones_mec):
+        return "MECANICA"
+
+    return "MECANICA"
+
+
+def normalizar_inspector(valor, central_norm, area, actividad=None, contexto_extra=""):
+    """
+    Corrige el inspector usando biblioteca por central y disciplina.
+    Si el área es OPERACIONES, siempre devuelve Y.ESPINOZA.
+    """
+    area_norm = quitar_acentos_basico(area).upper()
+
+    if area_norm == "OPERACIONES":
+        return INSPECTOR_OPERACIONES
+
+    existente = normalizar_inspector_existente(valor)
+    permitidos = []
+
+    for lista in INSPECTORES.get(central_norm, {}).values():
+        permitidos.extend(lista)
+
+    if existente:
+        # Si ya está dentro de la biblioteca de la central, respétalo.
+        existentes = [x.strip() for x in existente.split("/")]
+        if all(x in permitidos or x == INSPECTOR_OPERACIONES for x in existentes):
+            return existente
+
+    if area_norm == "HSE&Q":
+        # No tenemos biblioteca HSE&Q de supervisores; si no hay válido, no inventamos.
+        return existente or ""
+
+    disciplina = detectar_disciplina(actividad, contexto_extra)
+    opciones = INSPECTORES.get(central_norm, {}).get(disciplina, [])
+
+    if opciones:
+        return opciones[0]
+
+    return existente or ""
+
+
+def aplicar_normalizaciones_consolidadas(ws, fila, actividad, archivo_info=None):
+    """
+    Completa/normaliza Tipo Mant, Condición, Área Solicitante e Inspector.
+    Esta función se ejecuta después de copiar la fila original y aplicar fallbacks,
+    para que trabaje sobre los valores finales visibles en el Excel.
+    """
+    central_norm = normalizar_central(ws[f"{COLS_FALLBACK['central']}{fila}"].value)
+    proveedor = ws[f"{COLS_FALLBACK['empresa']}{fila}"].value
+
+    contexto_celdas = " ".join([
+        normalizar_texto(ws[f"{COLS_FALLBACK['unidad']}{fila}"].value),
+        normalizar_texto(ws[f"{COLS_FALLBACK['sistema']}{fila}"].value),
+        normalizar_texto(ws[f"{COLS_FALLBACK['equipo']}{fila}"].value),
+        normalizar_texto(ws[f"{COLS_FALLBACK['actividad']}{fila}"].value),
+        normalizar_texto(ws[f"{COLS_FALLBACK['rt_terceros']}{fila}"].value),
+        normalizar_texto(ws[f"{COLS_FALLBACK['recursos']}{fila}"].value),
+        normalizar_texto(proveedor),
+    ])
+
+    # Área solicitante.
+    area_actual = ws[f"{COLS_FALLBACK['area_solicitante']}{fila}"].value
+    area_norm = normalizar_area_solicitante(area_actual, actividad, proveedor)
+    ws[f"{COLS_FALLBACK['area_solicitante']}{fila}"] = area_norm
+
+    # Tipo de mantenimiento.
+    tipo_actual = ws[f"{COLS_FALLBACK['tipo_mant']}{fila}"].value
+    tipo_norm = normalizar_tipo_mant(tipo_actual, actividad, contexto_celdas)
+    ws[f"{COLS_FALLBACK['tipo_mant']}{fila}"] = tipo_norm
+
+    # Condición.
+    condicion_actual = ws[f"{COLS_FALLBACK['condicion']}{fila}"].value
+    condicion_norm = normalizar_condicion(condicion_actual, actividad, tipo_norm, contexto_celdas)
+    ws[f"{COLS_FALLBACK['condicion']}{fila}"] = condicion_norm
+
+    # Inspector.
+    inspector_actual = ws[f"{COLS_FALLBACK['inspector']}{fila}"].value
+    inspector_norm = normalizar_inspector(inspector_actual, central_norm, area_norm, actividad, contexto_celdas)
+    if inspector_norm:
+        ws[f"{COLS_FALLBACK['inspector']}{fila}"] = inspector_norm
+
+
+
 def parsear_fecha_para_excel(valor):
     """
-    Convierte fechas de Supabase/Excel a fecha real para Excel.
-
-    Casos soportados:
-    - 2026-06-22
-    - 2026-06-22 00:00
-    - 2026-06-22 00:00:00
-    - 2026-06-22T00:00:00
-    - 2026-06-22T00:00:00+00:00
-    - 22/06/2026
-
-    Devuelve date cuando logra interpretar el valor. Así Excel puede mostrarlo
-    con number_format = "dd/mm/yyyy".
+    Convierte fechas tipo '2026-06-22 00:00:00' o '2026-06-22'
+    a datetime/date para que Excel pueda mostrarlas como DD/MM/AAAA.
     """
     if valor is None:
         return None
@@ -927,33 +1141,16 @@ def parsear_fecha_para_excel(valor):
     if isinstance(valor, datetime):
         return valor.date()
 
-    # Si ya llega como date desde openpyxl, tiene strftime pero no necesariamente
-    # es datetime. Evitamos importar date para no tocar más dependencias.
-    if hasattr(valor, "strftime") and not isinstance(valor, str):
-        try:
-            return valor
-        except Exception:
-            pass
-
     texto = normalizar_texto(valor)
 
     if not texto:
-        return None
-
-    texto_iso = texto.replace("Z", "+00:00")
-
-    try:
-        return datetime.fromisoformat(texto_iso).date()
-    except Exception:
-        pass
+        return valor
 
     formatos = [
-        "%Y-%m-%d %H:%M",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d",
         "%d/%m/%Y",
-        "%d/%m/%y",
     ]
 
     for fmt in formatos:
@@ -1100,20 +1297,12 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         "condicion",
     )
 
-    # Completar bibliotecas del consolidado:
-    # Tipo Mant: PREV / CORR / PROY.
-    # Condición: E/S / F/S.
-    tipo_actual = ws[f"{COLS_FALLBACK['tipo_mant']}{fila_destino}"].value
-    condicion_actual = ws[f"{COLS_FALLBACK['condicion']}{fila_destino}"].value
-
-    tipo_inferido = inferir_tipo_mant(actividad, tipo_actual)
-    condicion_inferida = inferir_condicion(actividad, condicion_actual)
-
-    if tipo_inferido:
-        ws[f"{COLS_FALLBACK['tipo_mant']}{fila_destino}"] = tipo_inferido
-
-    if condicion_inferida:
-        ws[f"{COLS_FALLBACK['condicion']}{fila_destino}"] = condicion_inferida
+    ws[f"{COLS_FALLBACK['area_solicitante']}{fila_destino}"] = valor_original_o_fallback(
+        actividad,
+        columnas_originales,
+        COLS_FALLBACK["area_solicitante"],
+        "area_solicitante",
+    )
 
     ws[f"{COLS_FALLBACK['riesgo']}{fila_destino}"] = valor_original_o_fallback(
         actividad,
@@ -1145,6 +1334,7 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
         "motivo",
     )
 
+    aplicar_normalizaciones_consolidadas(ws, fila_destino, actividad, archivo_info)
     aplicar_formato_final_fila(ws, fila_destino)
 
 
