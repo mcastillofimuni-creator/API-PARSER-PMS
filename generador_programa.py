@@ -3,7 +3,7 @@ import re
 import json
 import tempfile
 from copy import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -528,17 +528,47 @@ def parece_layout_fuente_desplazado_b(columnas_originales):
     return b_parece_ot and c_parece_central and d_no_es_central and h_parece_motivo
 
 
-def columnas_originales_para_consolidado(columnas_originales):
+def proveedor_es_sefrel(actividad=None, archivo_info=None):
+    """
+    Identifica archivos SEFREL para aplicar el layout B con calendario LUN-VIE.
+    """
+    partes = []
+
+    if isinstance(actividad, dict):
+        partes.extend([
+            actividad.get("proveedor", ""),
+            actividad.get("empresa", ""),
+            actividad.get("actividad", ""),
+            actividad.get("motivo", ""),
+        ])
+
+    if isinstance(archivo_info, dict):
+        partes.extend([
+            archivo_info.get("proveedor", ""),
+            archivo_info.get("archivo_nombre", ""),
+        ])
+
+    texto = quitar_acentos_basico(" ".join([normalizar_texto(p) for p in partes])).upper()
+    return "SEFREL" in texto
+
+
+def columnas_originales_para_consolidado(columnas_originales, actividad=None, archivo_info=None):
     """
     Devuelve columnas ya alineadas a la plantilla destino.
+
     Para archivos estándar no hace nada.
-    Para archivos tipo GERER, remapea B:AH fuente hacia C:AJ destino.
-    No modifica la deduplicación ni la cantidad de filas.
+    Para archivos con bloque fuente iniciado en B, remapea a la plantilla destino.
+
+    Importante:
+    - GERER y otros layout B suelen traer días U:AA como SÁB:VIE.
+    - SEFREL trae días U:Y como LUN:VIE y Z:AA como sábado/domingo posterior,
+      por eso SEFREL requiere un mapeo especial de días.
+    - No modifica deduplicación ni la cantidad de filas.
     """
     if not parece_layout_fuente_desplazado_b(columnas_originales):
         return columnas_originales
 
-    remap = {
+    remap_base = {
         # Bloque principal
         "B": "C",   # OT / pedido -> N°OT / GRAFO
         "C": "D",   # Central
@@ -560,24 +590,45 @@ def columnas_originales_para_consolidado(columnas_originales):
         "S": "U",   # Inicio
         "T": "V",   # Fin
 
-        # Días Sáb-Vie
-        "U": "W",
-        "V": "X",
-        "W": "Y",
-        "X": "Z",
-        "Y": "AA",
-        "Z": "AB",
-        "AA": "AC",
-
         # Bloque final de empresa / texto / riesgos / controles
         "AB": "AD",  # Empresa
         "AC": "AE",  # Código de actividad
         "AD": "AF",  # Texto explicativo / actividad
-        "AE": "AG",  # Riesgo
-        "AF": "AH",  # Control de seguridad
+        "AE": "AG",  # Precio / riesgo, según formato fuente
+        "AF": "AH",  # Riesgo / control seguridad, según formato fuente
         "AG": "AI",  # Riesgo ambiental
         "AH": "AJ",  # Controles ambientales
+        "AI": "AK",  # Controles ambientales u otro campo del proveedor
+        "AJ": "AN",  # Riesgo existente
+        "AK": "AO",  # Riesgo introducido
+        "AL": "AP",  # Medida de control
+        "AM": "AQ",  # Observación
     }
+
+    if proveedor_es_sefrel(actividad, archivo_info):
+        # SEFREL: U:Y son LUN:VIE. Z:AA son sábado/domingo posterior, no pertenecen al PMS SÁB-VIE.
+        remap_dias = {
+            "U": "Y",    # Lunes
+            "V": "Z",    # Martes
+            "W": "AA",   # Miércoles
+            "X": "AB",   # Jueves
+            "Y": "AC",   # Viernes
+        }
+    else:
+        # GERER / layout B estándar observado: U:AA son SÁB:VIE.
+        remap_dias = {
+            "U": "W",    # Sábado
+            "V": "X",    # Domingo
+            "W": "Y",    # Lunes
+            "X": "Z",    # Martes
+            "Y": "AA",   # Miércoles
+            "Z": "AB",   # Jueves
+            "AA": "AC",  # Viernes
+        }
+
+    remap = {}
+    remap.update(remap_base)
+    remap.update(remap_dias)
 
     columnas_alineadas = {}
 
@@ -1297,6 +1348,84 @@ def valor_marca_dia(valor):
     return True
 
 
+def obtener_fecha_encabezado_dia(ws, columna):
+    """
+    Obtiene la fecha del encabezado de una columna de día.
+    Usa fila 8 como fuente principal; si viene como texto, intenta parsearla.
+    """
+    valor = ws[f"{columna}8"].value
+
+    if isinstance(valor, datetime):
+        return valor.date()
+
+    if isinstance(valor, date):
+        return valor
+
+    valor_parseado = parsear_fecha_para_excel(valor)
+
+    if isinstance(valor_parseado, datetime):
+        return valor_parseado.date()
+
+    if isinstance(valor_parseado, date):
+        return valor_parseado
+
+    return None
+
+
+def valor_para_rellenar_dia(ws, fila):
+    """
+    Si se necesita marcar un día por rango Inicio-Fin, decide qué valor poner.
+    Prioridad:
+    1. Alguna marca ya existente en W:AC.
+    2. Recursos si es numérico simple.
+    3. 'X' como marca mínima.
+    """
+    for col in COL_DIAS_SEMANA:
+        valor = ws[f"{col}{fila}"].value
+        if valor_marca_dia(valor):
+            return valor
+
+    recursos = normalizar_texto(ws[f"{COLS_FALLBACK['recursos']}{fila}"].value)
+    if re.fullmatch(r"\d+(\.\d+)?", recursos):
+        try:
+            return int(float(recursos))
+        except Exception:
+            return recursos
+
+    return "X"
+
+
+def completar_dias_por_rango_fechas(ws, fila):
+    """
+    Refuerza el schedule diario usando Inicio/Fin.
+    Esto corrige casos donde el proveedor sí programó sábado/domingo,
+    pero el layout fuente no dejó la marca alineada en W:AC.
+    """
+    inicio = parsear_fecha_para_excel(ws[f"{COL_INICIO_PROG}{fila}"].value)
+    fin = parsear_fecha_para_excel(ws[f"{COL_FIN_PROG}{fila}"].value)
+
+    if isinstance(inicio, datetime):
+        inicio = inicio.date()
+    if isinstance(fin, datetime):
+        fin = fin.date()
+
+    if not isinstance(inicio, date) or not isinstance(fin, date):
+        return
+
+    if fin < inicio:
+        inicio, fin = fin, inicio
+
+    marca = valor_para_rellenar_dia(ws, fila)
+
+    for col in COL_DIAS_SEMANA:
+        fecha_col = obtener_fecha_encabezado_dia(ws, col)
+
+        if isinstance(fecha_col, date) and inicio <= fecha_col <= fin:
+            celda = ws[f"{col}{fila}"]
+            if not valor_marca_dia(celda.value):
+                celda.value = marca
+
+
 def aplicar_formato_final_fila(ws, fila):
     """
     Ajustes finales después de copiar la fila original:
@@ -1314,7 +1443,11 @@ def aplicar_formato_final_fila(ws, fila):
         if celda.value not in [None, ""]:
             celda.number_format = "dd/mm/yyyy"
 
-    # 2) Riesgo crítico: si M tiene X, pintar toda la fila en amarillo.
+    # 2) Completar marcas de días a partir del rango Inicio-Fin.
+    # Esto evita que se pierda una marca de sábado/domingo cuando el proveedor usa layout distinto.
+    completar_dias_por_rango_fechas(ws, fila)
+
+    # 3) Riesgo crítico: si M tiene X, pintar toda la fila en amarillo.
     riesgo = normalizar_texto(ws[f"{COLS_FALLBACK['riesgo']}{fila}"].value).upper()
     riesgo_critico = bool(re.search(r"\bX\b", riesgo))
 
@@ -1322,7 +1455,7 @@ def aplicar_formato_final_fila(ws, fila):
         for col_idx in range(col_inicio, col_fin + 1):
             ws.cell(row=fila, column=col_idx).fill = copy(FILL_RIESGO_CRITICO)
 
-    # 3) Marcas de programación diaria: mantenerlas azules, incluso si la fila es amarilla.
+    # 4) Marcas de programación diaria: mantenerlas azules, incluso si la fila es amarilla.
     for col in COL_DIAS_SEMANA:
         celda = ws[f"{col}{fila}"]
         if valor_marca_dia(celda.value):
@@ -1336,7 +1469,7 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
     Si alguna columna no viene en el JSON, usa fallback desde pms_actividades.
     """
     columnas_originales = obtener_columnas_originales(actividad)
-    columnas_originales = columnas_originales_para_consolidado(columnas_originales)
+    columnas_originales = columnas_originales_para_consolidado(columnas_originales, actividad, archivo_info)
 
     col_inicio = column_index_from_string(COL_INICIO_DATOS)
     col_fin = column_index_from_string(COL_FIN_DATOS)
