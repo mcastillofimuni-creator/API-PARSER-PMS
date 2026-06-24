@@ -514,16 +514,23 @@ def parece_layout_fuente_desplazado_b(columnas_originales):
     # - B parece OT/Pedido o contiene OT solicitada.
     # - C parece central.
     # - D ya parece grupo/unidad, no central.
+    #
+    # Importante:
+    # SEFREL puede traer en B algo como "3500007180 // 10007128".
+    # Si se eliminan todos los no dígitos queda un número demasiado largo,
+    # por eso NO usamos fullmatch del texto limpio completo.
+    # En su lugar buscamos cualquier bloque de 6 a 10 dígitos dentro de B.
     b_parece_ot = bool(
         re.search(r"\b(OT|SOLICITADA|PEDIDO)\b", b)
-        or re.fullmatch(r"\d{6,10}", re.sub(r"\D", "", b))
+        or re.search(r"\d{6,10}", b)
     )
     c_parece_central = "SANTA ROSA" in c or "VENTANILLA" in c or c.startswith("CT ")
     d_no_es_central = "SANTA ROSA" not in d and "VENTANILLA" not in d
 
     # H como motivo también es una señal útil: en plantilla destino H normalmente es aviso,
     # pero en este layout fuente H contiene el motivo/descripción.
-    h_parece_motivo = len(h) >= 8 and not re.fullmatch(r"\d{6,10}", re.sub(r"\D", "", h))
+    h_digitos = re.sub(r"\D", "", h)
+    h_parece_motivo = len(h) >= 8 and not (h_digitos and re.fullmatch(r"\d{6,10}", h_digitos))
 
     return b_parece_ot and c_parece_central and d_no_es_central and h_parece_motivo
 
@@ -901,6 +908,163 @@ def es_actividad_consolidable(actividad):
     return True
 
 
+
+def extraer_columnas_originales_mutable(actividad):
+    """
+    Devuelve una copia mutable de datos_originales.columnas_excel.
+    Se usa para fusionar información útil de filas duplicadas sin cambiar
+    la cantidad de filas consolidadas.
+    """
+    datos = parse_jsonb(actividad.get("datos_originales"))
+    columnas = datos.get("columnas_excel")
+
+    if isinstance(columnas, dict):
+        return dict(columnas)
+
+    return {}
+
+
+def guardar_columnas_originales_mutable(actividad, columnas):
+    """
+    Guarda columnas_excel actualizadas dentro de datos_originales.
+    Mantiene el resto del JSON original cuando exista.
+    """
+    datos = parse_jsonb(actividad.get("datos_originales"))
+
+    if not isinstance(datos, dict):
+        datos = {}
+
+    datos["columnas_excel"] = columnas or {}
+    actividad["datos_originales"] = datos
+
+
+def parsear_fecha_generica(valor):
+    """
+    Parseo ligero para comparar fechas entre filas originales.
+    Acepta datetime/date y textos comunes de Excel/Supabase.
+    """
+    if valor is None:
+        return None
+
+    if isinstance(valor, datetime):
+        return valor.date()
+
+    if isinstance(valor, date):
+        return valor
+
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return None
+
+    formatos = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+    ]
+
+    for fmt in formatos:
+        try:
+            return datetime.strptime(texto, fmt).date()
+        except Exception:
+            pass
+
+    return None
+
+
+def fusionar_rango_fechas_columnas(cols_base, cols_nueva):
+    """
+    Fusiona Inicio/Fin de filas que el deduplicador considera equivalentes.
+
+    No aumenta la cantidad de filas. Solo evita perder programación cuando
+    varias filas repetidas traen rangos de fechas distintos.
+    Caso observado: GERER tenía filas equivalentes; algunas incluían sábado,
+    pero al quedarse solo la primera se perdía ese día.
+    """
+    if not isinstance(cols_base, dict) or not isinstance(cols_nueva, dict):
+        return cols_base
+
+    # Layout B fuente: S/T = Inicio/Fin.
+    # Layout estándar ya alineado: U/V = Inicio/Fin.
+    pares_fecha = [
+        ("S", "T"),
+        ("U", "V"),
+    ]
+
+    for col_ini, col_fin in pares_fecha:
+        fechas = []
+
+        for cols in [cols_base, cols_nueva]:
+            f_ini = parsear_fecha_generica(cols.get(col_ini))
+            f_fin = parsear_fecha_generica(cols.get(col_fin))
+
+            if f_ini:
+                fechas.append(f_ini)
+
+            if f_fin:
+                fechas.append(f_fin)
+
+        if not fechas:
+            continue
+
+        fecha_min = min(fechas)
+        fecha_max = max(fechas)
+
+        # Solo actualizamos el par si al menos una de las dos filas tenía ese layout.
+        if cols_base.get(col_ini) not in [None, ""] or cols_base.get(col_fin) not in [None, ""] or cols_nueva.get(col_ini) not in [None, ""] or cols_nueva.get(col_fin) not in [None, ""]:
+            cols_base[col_ini] = fecha_min
+            cols_base[col_fin] = fecha_max
+
+    return cols_base
+
+
+def fusionar_marcas_dias_columnas(cols_base, cols_nueva):
+    """
+    Fusiona marcas de días cuando una fila duplicada trae marcas que la
+    fila conservada no tenía.
+    """
+    if not isinstance(cols_base, dict) or not isinstance(cols_nueva, dict):
+        return cols_base
+
+    posibles_cols_dias = [
+        "U", "V", "W", "X", "Y", "Z", "AA",  # layout B fuente
+        "W", "X", "Y", "Z", "AA", "AB", "AC",  # layout estándar/destino
+    ]
+
+    for col in posibles_cols_dias:
+        valor_base = cols_base.get(col)
+        valor_nuevo = cols_nueva.get(col)
+
+        if valor_base in [None, "", "NULL", "None", "nan"] and valor_nuevo not in [None, "", "NULL", "None", "nan"]:
+            cols_base[col] = valor_nuevo
+
+    return cols_base
+
+
+def fusionar_actividad_duplicada(actividad_base, actividad_nueva):
+    """
+    Mantiene una sola fila consolidada, pero rescata información útil de
+    filas duplicadas: rango Inicio/Fin y marcas de días.
+
+    Esto conserva la decisión de deduplicar, pero evita perder schedule.
+    """
+    cols_base = extraer_columnas_originales_mutable(actividad_base)
+    cols_nueva = extraer_columnas_originales_mutable(actividad_nueva)
+
+    if not cols_base or not cols_nueva:
+        return actividad_base
+
+    cols_base = fusionar_rango_fechas_columnas(cols_base, cols_nueva)
+    cols_base = fusionar_marcas_dias_columnas(cols_base, cols_nueva)
+
+    guardar_columnas_originales_mutable(actividad_base, cols_base)
+
+    return actividad_base
+
+
 def clave_dedupe_actividad(actividad):
     """
     Clave técnica para evitar duplicados.
@@ -942,13 +1106,19 @@ def quitar_duplicados_tecnicos(actividades):
     vistos = set()
     limpias = []
 
+    indice_por_clave = {}
+
     for a in actividades:
         clave = clave_dedupe_actividad(a)
 
         if clave in vistos:
+            idx_base = indice_por_clave.get(clave)
+            if idx_base is not None:
+                limpias[idx_base] = fusionar_actividad_duplicada(limpias[idx_base], a)
             continue
 
         vistos.add(clave)
+        indice_por_clave[clave] = len(limpias)
         limpias.append(a)
 
     return limpias
