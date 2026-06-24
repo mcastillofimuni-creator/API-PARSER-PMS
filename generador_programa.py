@@ -475,6 +475,126 @@ def obtener_campos_detectados(actividad):
     return {}
 
 
+def parece_layout_fuente_desplazado_b(columnas_originales):
+    """
+    Detecta archivos fuente donde el bloque de datos empieza en B en lugar de C.
+    Caso observado: GERER.
+    Fuente:
+      B = N°OT / PEDIDO
+      C = CENTRAL
+      D = GRUPO
+      E = SISTEMA
+      F = EQUIPO
+      G = COD MP / AVISO
+      H = MOTIVO
+      I = TIPO MANT
+      J = CONDICION
+      K = RIESGO CRITICO
+      L = AREA SOLICITANTE
+      M = INSPECTOR
+      N = RT TERCEROS
+      O = RECURSOS
+      P = HORA INICIO
+      Q = HORA FIN
+      R = DIAS
+      S = INICIO
+      T = FIN
+      U:AA = SÁB:VIE
+      AB:AH = EMPRESA / CODIGO / TEXTO / RIESGOS / CONTROLES
+    """
+    if not isinstance(columnas_originales, dict):
+        return False
+
+    b = normalizar_texto(columnas_originales.get("B", "")).upper()
+    c = normalizar_texto(columnas_originales.get("C", "")).upper()
+    d = normalizar_texto(columnas_originales.get("D", "")).upper()
+    h = normalizar_texto(columnas_originales.get("H", "")).upper()
+
+    # Señales fuertes:
+    # - B parece OT/Pedido o contiene OT solicitada.
+    # - C parece central.
+    # - D ya parece grupo/unidad, no central.
+    b_parece_ot = bool(
+        re.search(r"\b(OT|SOLICITADA|PEDIDO)\b", b)
+        or re.fullmatch(r"\d{6,10}", re.sub(r"\D", "", b))
+    )
+    c_parece_central = "SANTA ROSA" in c or "VENTANILLA" in c or c.startswith("CT ")
+    d_no_es_central = "SANTA ROSA" not in d and "VENTANILLA" not in d
+
+    # H como motivo también es una señal útil: en plantilla destino H normalmente es aviso,
+    # pero en este layout fuente H contiene el motivo/descripción.
+    h_parece_motivo = len(h) >= 8 and not re.fullmatch(r"\d{6,10}", re.sub(r"\D", "", h))
+
+    return b_parece_ot and c_parece_central and d_no_es_central and h_parece_motivo
+
+
+def columnas_originales_para_consolidado(columnas_originales):
+    """
+    Devuelve columnas ya alineadas a la plantilla destino.
+    Para archivos estándar no hace nada.
+    Para archivos tipo GERER, remapea B:AH fuente hacia C:AJ destino.
+    No modifica la deduplicación ni la cantidad de filas.
+    """
+    if not parece_layout_fuente_desplazado_b(columnas_originales):
+        return columnas_originales
+
+    remap = {
+        # Bloque principal
+        "B": "C",   # OT / pedido -> N°OT / GRAFO
+        "C": "D",   # Central
+        "D": "E",   # Grupo
+        "E": "F",   # Sistema
+        "F": "G",   # Equipo
+        "G": "H",   # Cod MP / Aviso
+        "H": "J",   # Motivo
+        "I": "K",   # Tipo mant
+        "J": "L",   # Condición
+        "K": "M",   # Riesgo crítico
+        "L": "N",   # Área solicitante
+        "M": "O",   # Inspector
+        "N": "P",   # RT terceros
+        "O": "Q",   # Recursos
+        "P": "R",   # Hora inicio
+        "Q": "S",   # Hora fin
+        "R": "T",   # Días
+        "S": "U",   # Inicio
+        "T": "V",   # Fin
+
+        # Días Sáb-Vie
+        "U": "W",
+        "V": "X",
+        "W": "Y",
+        "X": "Z",
+        "Y": "AA",
+        "Z": "AB",
+        "AA": "AC",
+
+        # Bloque final de empresa / texto / riesgos / controles
+        "AB": "AD",  # Empresa
+        "AC": "AE",  # Código de actividad
+        "AD": "AF",  # Texto explicativo / actividad
+        "AE": "AG",  # Riesgo
+        "AF": "AH",  # Control de seguridad
+        "AG": "AI",  # Riesgo ambiental
+        "AH": "AJ",  # Controles ambientales
+    }
+
+    columnas_alineadas = {}
+
+    for col_fuente, valor in columnas_originales.items():
+        col_destino = remap.get(col_fuente)
+        if col_destino:
+            columnas_alineadas[col_destino] = valor
+
+    # Conserva valores fuera del remapeo solo si no chocan con columnas destino.
+    # Esto evita perder información no prevista sin volver a desfasar el bloque principal.
+    for col_fuente, valor in columnas_originales.items():
+        if col_fuente not in remap and col_fuente not in columnas_alineadas:
+            columnas_alineadas[col_fuente] = valor
+
+    return columnas_alineadas
+
+
 def valor_original_o_fallback(actividad, columnas_originales, letra_columna, *fallback_keys):
     """
     Primero intenta usar la columna original del Excel.
@@ -1216,6 +1336,7 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
     Si alguna columna no viene en el JSON, usa fallback desde pms_actividades.
     """
     columnas_originales = obtener_columnas_originales(actividad)
+    columnas_originales = columnas_originales_para_consolidado(columnas_originales)
 
     col_inicio = column_index_from_string(COL_INICIO_DATOS)
     col_fin = column_index_from_string(COL_FIN_DATOS)
@@ -1458,4 +1579,5 @@ def generar_programa_unico(
         "numero_pms": numero_pms,
         "pms_label": f"PMS {numero_pms}",
     }
+
 
