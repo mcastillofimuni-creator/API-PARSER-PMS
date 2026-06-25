@@ -285,6 +285,14 @@ def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
         if "condicion" in a:
             fila["condicion"] = a.get("condicion")
 
+        # Campo nuevo: pedido SAP detectado en columna propia o movido desde OT/Grafo
+        # cuando el proveedor colocó un número tipo 3500xxxx / 4500xxxx.
+        if "numero_pedido" in a:
+            fila["numero_pedido"] = a.get("numero_pedido")
+
+        if "pedido" in a and a.get("pedido") and not fila.get("numero_pedido"):
+            fila["numero_pedido"] = a.get("pedido")
+
         if "dias" in a:
             fila["dias"] = normalizar_lista(a.get("dias"))
 
