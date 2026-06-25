@@ -937,6 +937,31 @@ def _buscar_en_raw_sap(row: Dict[str, Any], claves: List[str]) -> str:
     return buscar_valor_en_raw(raw, claves)
 
 
+
+
+def _extraer_codigo_plan_pm_texto(valor: Any) -> str:
+    """Extrae códigos tipo PTSRW7ME0349 desde texto SAP."""
+    import re
+    txt = str(valor or "").upper().strip()
+    if not txt:
+        return ""
+
+    # Ej.: ME_SR_... (PTSRW7ME0349)
+    codigos_parentesis = re.findall(r"\(([A-Z]{2,}[A-Z0-9]{4,})\)", txt)
+    for codigo in codigos_parentesis:
+        if len(codigo) >= 8 and re.search(r"\d", codigo):
+            return codigo
+
+    # Ej.: PTSRW7ME0349 sin paréntesis
+    candidatos = re.findall(r"\b([A-Z]{2,}[A-Z0-9]{6,})\b", txt)
+    for codigo in candidatos:
+        if len(codigo) >= 8 and re.search(r"\d", codigo):
+            if codigo not in {"PLANIFICADO", "PROGRAMADO", "MANTENIMIENTO", "PREVENTIVO"}:
+                return codigo
+
+    return ""
+
+
 def _extraer_pedido_sap(row: Optional[Dict[str, Any]]) -> str:
     if not row:
         return ""
@@ -964,22 +989,37 @@ def _extraer_pedido_sap(row: Optional[Dict[str, Any]]) -> str:
 def _extraer_plan_pm_sap(row: Optional[Dict[str, Any]]) -> str:
     if not row:
         return ""
+
     candidatos = [
         row.get("plan_pm"),
         row.get("cod_pm"),
         row.get("codigo_pm"),
         row.get("plan_mantenimiento"),
+        row.get("descripcion_plan_mantenimiento"),
         _buscar_en_raw_sap(row, [
+            "Plan de mantenimiento preventivo",
             "Plan de mantenimiento", "Plan mant.", "Plan mant", "Plan mantto",
             "Plan mantenimiento", "Plan de mantto", "Plan PM", "Código PM",
-            "Codigo PM", "COD PM", "Cod PM", "Grupo planificador", "Hoja de ruta",
+            "Codigo PM", "COD PM", "Cod PM",
+            "Descripción del plan de mantenimiento", "Descripcion del plan de mantenimiento",
+            "Grupo planificador", "Hoja de ruta", "Hoja de ruta para mantenimiento",
             "Estrategia de mantenimiento", "Posición de mantenimiento", "Posicion de mantenimiento"
         ]),
     ]
+
     for c in candidatos:
         txt = str(c or "").strip()
-        if txt:
-            return txt
+        if not txt:
+            continue
+
+        codigo = _extraer_codigo_plan_pm_texto(txt)
+        if codigo:
+            return codigo
+
+        # Si ya vino limpio como código, lo aceptamos.
+        if len(txt) >= 6 and any(ch.isdigit() for ch in txt) and any(ch.isalpha() for ch in txt):
+            return txt.upper()
+
     return ""
 
 
