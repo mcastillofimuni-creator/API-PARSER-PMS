@@ -261,45 +261,152 @@ def _limpiar_filas_participantes(tabla) -> None:
             _set_cell_text(cell, str(idx) if cidx == 0 else "")
 
 
+def _normalizar_separadores_participante(texto: str) -> str:
+    """Unifica separadores raros que suelen venir desde Word/Copilot."""
+    t = _safe_text(texto)
+    # Guiones: hyphen, en dash, em dash, non-breaking hyphen, minus sign.
+    t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2212]", "-", t)
+    t = t.replace("：", ":")
+    return t
+
+
+def _normalizar_area_participante(area: str, contexto_orygen: bool = False) -> str:
+    a = _normalizar_espacios(area)
+    if not a:
+        return "Orygen" if contexto_orygen else ""
+
+    au = a.upper()
+    if "HSE" in au or "HSQ" in au or "HSEQ" in au:
+        return "HSE&Q"
+    if "MANT" in au:
+        return "Mantenimiento"
+    if "OPER" in au:
+        return "Operaciones"
+    if "ORYGEN" in au:
+        return "Orygen"
+    return _formato_empresa(a)
+
+
+
+def _es_area_participante(texto: str) -> bool:
+    """Reconoce si un texto parece ser un área/rol y no un nombre."""
+    t = _normalizar_espacios(texto).upper()
+    if not t:
+        return False
+    t = t.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    claves = [
+        "HSE", "HSEQ", "HSE&Q", "HSQ",
+        "MANT", "MANTTO", "MANTENIMIENTO", "MANTENIMENTO",
+        "OPER", "OPERACIONES", "ORYGEN",
+        "ELECT", "ELECTRICIDAD", "MECAN", "MECANICA",
+        "INSTRUMENT", "I&C", "CONTROL",
+    ]
+    return any(k in t for k in claves)
+
 def _extraer_participantes_adicionales(notas: str) -> List[Dict[str, str]]:
     """
-    Parser simple de notas. Detecta líneas como:
+    Parser simple y robusto de notas. Detecta formatos como:
     - Hector Tinoco (Orygen - HSE&Q)
-    - Manuel Castillo (Orygen - Mantenimiento)
-    - Carolina Mostajo - ORYGEN
+    - Hector Tinoco (HSEq)
+    - Hector Tinoco – HSE&Q
+    - Hector Tinoco — HSE&Q
+    - Hector Tinoco - HSE&Q
+    - Hector Tinoco: HSE&Q
+    - Mantenimiento: Manuel Castillo / Miguel Tasayco
+    - Mantto: Manuel Castillo y Miguel Tasayco
+    - HSE&Q: Hector Tinoco, Carolina Mostajo
+
+    También interpreta el bloque posterior a frases tipo:
+    "Participaron por parte de Orygen:".
     """
     participantes = []
     vistos = set()
+    en_bloque_orygen = False
+
+    def agregar(nombre: str, empresa: str):
+        nombre = _normalizar_espacios(nombre)
+        empresa = _normalizar_area_participante(empresa, contexto_orygen=en_bloque_orygen)
+        if not nombre:
+            return
+        # Evitar frases que no son nombres.
+        if nombre.upper().startswith(("PARTICIPARON", "PARTICIPANTES", "COMENTARIOS", "NOTA", "OBSERVACIONES", "ACUERDOS")):
+            return
+        # Evitar que un área sea interpretada como nombre.
+        if _es_area_participante(nombre):
+            return
+        key = (nombre.upper(), empresa.upper())
+        if key in vistos:
+            return
+        participantes.append({"nombre": _formato_nombre(nombre), "contrato": "", "empresa": empresa or "Orygen"})
+        vistos.add(key)
+
+    def dividir_nombres(texto_nombres: str) -> List[str]:
+        texto_nombres = _normalizar_espacios(texto_nombres)
+        if not texto_nombres:
+            return []
+        # Separadores típicos para varios participantes.
+        partes = re.split(r"\s*(?:/|,|;|\by\b|\+)\s*", texto_nombres, flags=re.IGNORECASE)
+        return [_normalizar_espacios(x) for x in partes if _normalizar_espacios(x)]
 
     for raw in _corregir_texto_basico(notas).splitlines():
-        line = raw.strip(" -*\t")
+        line = _normalizar_separadores_participante(raw).strip(" -*\t")
         if not line:
             continue
 
-        m = re.match(r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .']{3,})\s*\(([^)]+)\)\s*$", line)
-        if m:
-            nombre = _normalizar_espacios(m.group(1))
-            info = _normalizar_espacios(m.group(2))
-            empresa = "ORYGEN" if "ORYGEN" in info.upper() else info.upper()
-            key = (nombre.upper(), empresa.upper())
-            if key not in vistos:
-                participantes.append({"nombre": nombre, "contrato": "", "empresa": empresa})
-                vistos.add(key)
+        line_upper = line.upper()
+        if "PARTICIP" in line_upper and ("ORYGEN" in line_upper or "PARTE" in line_upper):
+            en_bloque_orygen = True
             continue
 
-        m = re.match(r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .']{3,})\s*[-–]\s*([A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ &.]+)\s*$", line)
+        # Formato invertido: Área: Nombre / Nombre
+        # Ej.: Mantenimiento: Manuel Castillo/Miguel Tasayco
+        # Ej.: HSE&Q: Hector Tinoco, Carolina Mostajo
+        m = re.match(
+            r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ &./]+?)\s*:\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .'/,+;-]{3,})\s*$",
+            line,
+        )
+        if m and _es_area_participante(m.group(1)):
+            area = m.group(1)
+            for nombre in dividir_nombres(m.group(2)):
+                agregar(nombre, area)
+            continue
+
+        # Formato invertido con guion: Área - Nombre / Nombre
+        # Ej.: Mantenimiento - Manuel Castillo / Miguel Tasayco
+        m = re.match(
+            r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ &./]+?)\s*-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .'/,+;-]{3,})\s*$",
+            line,
+        )
+        if m and _es_area_participante(m.group(1)):
+            area = m.group(1)
+            for nombre in dividir_nombres(m.group(2)):
+                agregar(nombre, area)
+            continue
+
+        # Nombre (Orygen - Área) o Nombre (Área)
+        m = re.match(r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .']{3,})\s*\(([^)]+)\)\s*$", line)
         if m:
-            nombre = _normalizar_espacios(m.group(1))
-            empresa = _normalizar_espacios(m.group(2)).upper()
-            if "ORYGEN" in empresa or "HSE" in empresa or "MANT" in empresa:
-                empresa_final = "ORYGEN" if "ORYGEN" in empresa else empresa
-                key = (nombre.upper(), empresa_final.upper())
-                if key not in vistos:
-                    participantes.append({"nombre": nombre, "contrato": "", "empresa": empresa_final})
-                    vistos.add(key)
+            nombre = m.group(1)
+            info = _normalizar_separadores_participante(m.group(2))
+            partes = [x.strip() for x in re.split(r"\s*-\s*", info) if x.strip()]
+            area = partes[-1] if partes else info
+            agregar(nombre, area)
+            continue
+
+        # Nombre - Área / Nombre: Área.
+        m = re.match(
+            r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ .']{3,}?)\s*(?:-|:|;)\s*([A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ &./]+)\s*$",
+            line,
+        )
+        if m:
+            agregar(m.group(1), m.group(2))
+            continue
+
+        # En bloque Orygen, aceptar una línea con solo nombre como participante Orygen.
+        if en_bloque_orygen and re.match(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ .']{5,}$", line):
+            agregar(line, "Orygen")
 
     return participantes
-
 
 def _estado_simple(estado: str) -> str:
     e = _safe_text(estado).upper()
