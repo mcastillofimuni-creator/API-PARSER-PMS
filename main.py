@@ -1046,6 +1046,7 @@ async def control_sap_validar_ots(
             aviso_valor = act.get("cod_pm_aviso") or buscar_valor_en_raw(raw, [
                 "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
             ])
+            aviso_detectado = ", ".join(extraer_numeros_sap(aviso_valor))
 
             numeros = extraer_numeros_sap(ot_valor)
             campo_origen = "OT/Grafo"
@@ -1065,6 +1066,7 @@ async def control_sap_validar_ots(
                     "empresa": act.get("proveedor"),
                     "fila_excel": act.get("fila_excel"),
                     "numero_pms": "",
+                    "aviso_pms": aviso_detectado,
                     "campo_origen": "Sin número",
                     "actividad_pms": act.get("actividad"),
                     "unidad_pms": act.get("unidad"),
@@ -1073,6 +1075,7 @@ async def control_sap_validar_ots(
                     "estado": "SIN_NUMERO",
                     "observacion": "La actividad no tiene OT ni Aviso identificable.",
                     "ot_sap": "",
+                    "aviso_sap": sugerida.get("numero_aviso") or "",
                     "descripcion_sap": "",
                     "ot_sugerida": sugerida.get("numero_ot") or "",
                     "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
@@ -1103,6 +1106,7 @@ async def control_sap_validar_ots(
                         "empresa": act.get("proveedor"),
                         "fila_excel": act.get("fila_excel"),
                         "numero_pms": numero,
+                        "aviso_pms": aviso_detectado,
                         "campo_origen": campo_origen,
                         "actividad_pms": act.get("actividad"),
                         "unidad_pms": act.get("unidad"),
@@ -1111,6 +1115,7 @@ async def control_sap_validar_ots(
                         "estado": estado_fila,
                         "observacion": obs,
                         "ot_sap": row_ot.get("numero_ot") or "",
+                        "aviso_sap": row_ot.get("numero_aviso") or "",
                         "descripcion_sap": row_ot.get("descripcion_ot") or row_ot.get("descripcion_aviso") or "",
                         "ot_sugerida": row_ot.get("numero_ot") or "",
                         "descripcion_sugerida": row_ot.get("descripcion_ot") or row_ot.get("descripcion_aviso") or "",
@@ -1128,6 +1133,7 @@ async def control_sap_validar_ots(
                         "empresa": act.get("proveedor"),
                         "fila_excel": act.get("fila_excel"),
                         "numero_pms": numero,
+                        "aviso_pms": aviso_detectado,
                         "campo_origen": campo_origen,
                         "actividad_pms": act.get("actividad"),
                         "unidad_pms": act.get("unidad"),
@@ -1136,6 +1142,7 @@ async def control_sap_validar_ots(
                         "estado": "AVISO_COMO_OT",
                         "observacion": "El número informado no existe como OT, pero sí existe como Aviso SAP.",
                         "ot_sap": "",
+                        "aviso_sap": row_aviso.get("numero_aviso") or "",
                         "descripcion_sap": row_aviso.get("descripcion_aviso") or "",
                         "ot_sugerida": sugerida_ot,
                         "descripcion_sugerida": row_aviso.get("descripcion_ot") or row_aviso.get("descripcion_aviso") or "",
@@ -1156,6 +1163,7 @@ async def control_sap_validar_ots(
                     "empresa": act.get("proveedor"),
                     "fila_excel": act.get("fila_excel"),
                     "numero_pms": numero,
+                    "aviso_pms": aviso_detectado,
                     "campo_origen": campo_origen,
                     "actividad_pms": act.get("actividad"),
                     "unidad_pms": act.get("unidad"),
@@ -1164,6 +1172,7 @@ async def control_sap_validar_ots(
                     "estado": "NO_ENCONTRADA",
                     "observacion": "El número informado no fue encontrado como OT ni como Aviso en el Excel SAP cargado.",
                     "ot_sap": "",
+                    "aviso_sap": sugerida.get("numero_aviso") or "",
                     "descripcion_sap": "",
                     "ot_sugerida": sugerida.get("numero_ot") or "",
                     "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
