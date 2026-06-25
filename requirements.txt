@@ -6,3 +6,4 @@ rapidfuzz
 python-dotenv
 supabase
 python-multipart
+python-docx
