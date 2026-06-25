@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -13,12 +13,14 @@ from parser_pms import preparar_datos_parser
 from generador_programa import generar_programa_unico
 from generador_acta import generar_acta_interferencias
 from parser_sap_ordenes import parsear_ordenes_sap
+from rapidfuzz import fuzz
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "pms-archivos").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*").strip()
+SAP_PANEL_PASSWORD = os.getenv("SAP_PANEL_PASSWORD", "2110").strip()
 
 if not SUPABASE_URL:
     raise RuntimeError("Falta la variable de entorno SUPABASE_URL.")
@@ -113,6 +115,8 @@ def root():
             "/generar-acta-interferencias",
             "/cargar-maestro-sap",
             "/validar-pms-contra-sap",
+            "/control-sap/validar-ots",
+            "/control-sap/actualizar-ot",
         ],
     }
 
@@ -891,4 +895,328 @@ def validar_pms_contra_sap(req: ValidarSapRequest):
             status_code=500,
             detail=f"No se pudo validar PMS contra SAP: {exc}",
         )
+
+
+# ─── Control SAP privado ───
+
+def _validar_password_sap(password: str):
+    if str(password or "").strip() != SAP_PANEL_PASSWORD:
+        raise HTTPException(status_code=401, detail="Clave incorrecta para Control SAP.")
+
+
+def _indexar_registros_sap(registros: List[Dict[str, Any]]):
+    por_ot: Dict[str, Dict[str, Any]] = {}
+    por_aviso: Dict[str, Dict[str, Any]] = {}
+    for r in registros:
+        ot = str(r.get("numero_ot") or "").strip()
+        av = str(r.get("numero_aviso") or "").strip()
+        if ot and ot not in por_ot:
+            por_ot[ot] = r
+        if av and av not in por_aviso:
+            por_aviso[av] = r
+    return por_ot, por_aviso
+
+
+def _texto_sap_para_score(r: Dict[str, Any]) -> str:
+    partes = [
+        r.get("descripcion_ot"),
+        r.get("descripcion_aviso"),
+        r.get("descripcion_objeto_tecnico"),
+        r.get("equipo"),
+        r.get("ubicacion_tecnica"),
+        r.get("objeto_tecnico"),
+    ]
+    return " ".join(str(x or "") for x in partes).strip()
+
+
+def _sugerir_ot_por_texto(actividad: Dict[str, Any], registros: List[Dict[str, Any]], central_req: str) -> Dict[str, Any]:
+    texto_pms = " ".join(str(x or "") for x in [
+        actividad.get("actividad"),
+        actividad.get("unidad"),
+        actividad.get("sistema"),
+        actividad.get("equipo"),
+    ]).strip()
+
+    if not texto_pms:
+        return {}
+
+    mejor = None
+    mejor_score = -1
+
+    for r in registros:
+        ot = str(r.get("numero_ot") or "").strip()
+        if not ot:
+            continue
+
+        central_sap = normalizar_central_backend(r.get("central"))
+        if central_req and central_sap and central_sap != central_req:
+            # Penalizamos otra central, no la descartamos totalmente por si SAP vino con central rara.
+            penalizacion = 15
+        else:
+            penalizacion = 0
+
+        texto_sap = _texto_sap_para_score(r)
+        if not texto_sap:
+            continue
+
+        score = int(fuzz.token_set_ratio(texto_pms.upper(), texto_sap.upper())) - penalizacion
+
+        unidad = str(actividad.get("unidad") or "").upper().strip()
+        if unidad and unidad in texto_sap.upper():
+            score += 8
+
+        if score > mejor_score:
+            mejor_score = score
+            mejor = r
+
+    if not mejor:
+        return {}
+
+    return {
+        "numero_ot": mejor.get("numero_ot"),
+        "descripcion_ot": mejor.get("descripcion_ot") or mejor.get("descripcion_aviso") or _texto_sap_para_score(mejor),
+        "numero_aviso": mejor.get("numero_aviso"),
+        "estado_control": mejor.get("estado_control"),
+        "central": mejor.get("central"),
+        "score": max(0, min(100, mejor_score)),
+    }
+
+
+@app.post("/control-sap/validar-ots")
+async def control_sap_validar_ots(
+    password: str = Form(...),
+    semana: str = Form(...),
+    central: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """
+    Panel privado: recibe Excel SAP, valida contra pms_actividades de la semana/central,
+    y devuelve una tabla comparativa sin modificar el PMS.
+    """
+    _validar_password_sap(password)
+    central_req = normalizar_central_backend(central)
+
+    nombre = file.filename or "ordenes_sap.xlsx"
+    suffix = Path(nombre).suffix or ".xlsx"
+    ruta_local = None
+
+    try:
+        contenido = await file.read()
+        if not contenido:
+            raise HTTPException(status_code=400, detail="El archivo SAP está vacío.")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(contenido)
+        tmp.flush()
+        tmp.close()
+        ruta_local = tmp.name
+
+        resultado_sap = parsear_ordenes_sap(ruta_local, archivo_fuente=nombre)
+        registros_sap = resultado_sap.get("registros") or []
+        por_ot, por_aviso = _indexar_registros_sap(registros_sap)
+
+        actividades_resp = (
+            supabase.table("pms_actividades")
+            .select("*")
+            .eq("semana", semana)
+            .execute()
+        )
+        actividades = actividades_resp.data or []
+        actividades = [
+            a for a in actividades
+            if not central_req or normalizar_central_backend(a.get("central")) == central_req
+        ]
+
+        filas = []
+        resumen = {
+            "actividades_revisadas": len(actividades),
+            "ots_ok": 0,
+            "avisos_como_ot": 0,
+            "no_encontradas": 0,
+            "sin_numero": 0,
+            "sugeridas": 0,
+            "estado_no_operativo": 0,
+        }
+
+        for act in actividades:
+            raw = act.get("datos_originales") or {}
+            ot_valor = act.get("ot_grafo") or buscar_valor_en_raw(raw, [
+                "N°OT / GRAFO", "N°OT / PEDIDO", "N° OT", "OT", "ORDEN", "NºOT / GRAFO", "N°OT"
+            ])
+            aviso_valor = act.get("cod_pm_aviso") or buscar_valor_en_raw(raw, [
+                "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
+            ])
+
+            numeros = extraer_numeros_sap(ot_valor)
+            campo_origen = "OT/Grafo"
+            if not numeros:
+                numeros = extraer_numeros_sap(aviso_valor)
+                campo_origen = "Aviso/COD PM"
+
+            if not numeros:
+                sugerida = _sugerir_ot_por_texto(act, registros_sap, central_req)
+                if sugerida.get("numero_ot"):
+                    resumen["sugeridas"] += 1
+                else:
+                    resumen["sin_numero"] += 1
+                filas.append({
+                    "actividad_id": act.get("id"),
+                    "pms_archivo_id": act.get("pms_archivo_id"),
+                    "empresa": act.get("proveedor"),
+                    "fila_excel": act.get("fila_excel"),
+                    "numero_pms": "",
+                    "campo_origen": "Sin número",
+                    "actividad_pms": act.get("actividad"),
+                    "unidad_pms": act.get("unidad"),
+                    "sistema_pms": act.get("sistema"),
+                    "equipo_pms": act.get("equipo"),
+                    "estado": "SIN_NUMERO",
+                    "observacion": "La actividad no tiene OT ni Aviso identificable.",
+                    "ot_sap": "",
+                    "descripcion_sap": "",
+                    "ot_sugerida": sugerida.get("numero_ot") or "",
+                    "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
+                    "score_sugerencia": sugerida.get("score") or 0,
+                    "estado_sap": sugerida.get("estado_control") or "",
+                })
+                continue
+
+            for numero in numeros:
+                row_ot = por_ot.get(numero)
+                row_aviso = por_aviso.get(numero)
+                sugerida = {}
+
+                if row_ot:
+                    estado = str(row_ot.get("estado_control") or "")
+                    if estado in {"CERRADO_TEC", "BORRADO", "COMPLETADO_EMPRESA"}:
+                        resumen["estado_no_operativo"] += 1
+                        estado_fila = "ESTADO_NO_OPERATIVO"
+                        obs = f"La OT existe en SAP, pero figura con estado {estado}."
+                    else:
+                        resumen["ots_ok"] += 1
+                        estado_fila = "OK"
+                        obs = "La OT informada existe en SAP."
+
+                    filas.append({
+                        "actividad_id": act.get("id"),
+                        "pms_archivo_id": act.get("pms_archivo_id"),
+                        "empresa": act.get("proveedor"),
+                        "fila_excel": act.get("fila_excel"),
+                        "numero_pms": numero,
+                        "campo_origen": campo_origen,
+                        "actividad_pms": act.get("actividad"),
+                        "unidad_pms": act.get("unidad"),
+                        "sistema_pms": act.get("sistema"),
+                        "equipo_pms": act.get("equipo"),
+                        "estado": estado_fila,
+                        "observacion": obs,
+                        "ot_sap": row_ot.get("numero_ot") or "",
+                        "descripcion_sap": row_ot.get("descripcion_ot") or row_ot.get("descripcion_aviso") or "",
+                        "ot_sugerida": row_ot.get("numero_ot") or "",
+                        "descripcion_sugerida": row_ot.get("descripcion_ot") or row_ot.get("descripcion_aviso") or "",
+                        "score_sugerencia": 100,
+                        "estado_sap": estado,
+                    })
+                    continue
+
+                if row_aviso:
+                    resumen["avisos_como_ot"] += 1
+                    sugerida_ot = row_aviso.get("numero_ot") or ""
+                    filas.append({
+                        "actividad_id": act.get("id"),
+                        "pms_archivo_id": act.get("pms_archivo_id"),
+                        "empresa": act.get("proveedor"),
+                        "fila_excel": act.get("fila_excel"),
+                        "numero_pms": numero,
+                        "campo_origen": campo_origen,
+                        "actividad_pms": act.get("actividad"),
+                        "unidad_pms": act.get("unidad"),
+                        "sistema_pms": act.get("sistema"),
+                        "equipo_pms": act.get("equipo"),
+                        "estado": "AVISO_COMO_OT",
+                        "observacion": "El número informado no existe como OT, pero sí existe como Aviso SAP.",
+                        "ot_sap": "",
+                        "descripcion_sap": row_aviso.get("descripcion_aviso") or "",
+                        "ot_sugerida": sugerida_ot,
+                        "descripcion_sugerida": row_aviso.get("descripcion_ot") or row_aviso.get("descripcion_aviso") or "",
+                        "score_sugerencia": 90 if sugerida_ot else 0,
+                        "estado_sap": row_aviso.get("estado_control") or "",
+                    })
+                    continue
+
+                sugerida = _sugerir_ot_por_texto(act, registros_sap, central_req)
+                if sugerida.get("numero_ot"):
+                    resumen["sugeridas"] += 1
+                else:
+                    resumen["no_encontradas"] += 1
+
+                filas.append({
+                    "actividad_id": act.get("id"),
+                    "pms_archivo_id": act.get("pms_archivo_id"),
+                    "empresa": act.get("proveedor"),
+                    "fila_excel": act.get("fila_excel"),
+                    "numero_pms": numero,
+                    "campo_origen": campo_origen,
+                    "actividad_pms": act.get("actividad"),
+                    "unidad_pms": act.get("unidad"),
+                    "sistema_pms": act.get("sistema"),
+                    "equipo_pms": act.get("equipo"),
+                    "estado": "NO_ENCONTRADA",
+                    "observacion": "El número informado no fue encontrado como OT ni como Aviso en el Excel SAP cargado.",
+                    "ot_sap": "",
+                    "descripcion_sap": "",
+                    "ot_sugerida": sugerida.get("numero_ot") or "",
+                    "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
+                    "score_sugerencia": sugerida.get("score") or 0,
+                    "estado_sap": sugerida.get("estado_control") or "",
+                })
+
+        return {
+            "ok": True,
+            "semana": semana,
+            "central": central_req,
+            "archivo_fuente": nombre,
+            "sap": resultado_sap.get("resumen") or {},
+            "resumen": resumen,
+            "filas": filas,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo validar OTs en Control SAP: {exc}")
+    finally:
+        if ruta_local:
+            try:
+                os.remove(ruta_local)
+            except Exception:
+                pass
+
+
+class ActualizarOtControlSapRequest(BaseModel):
+    password: str
+    actividad_id: str
+    ot_nueva: str
+
+
+@app.post("/control-sap/actualizar-ot")
+def control_sap_actualizar_ot(req: ActualizarOtControlSapRequest):
+    """Actualiza manualmente la OT/Grafo de una actividad PMS."""
+    _validar_password_sap(req.password)
+    ot = str(req.ot_nueva or "").strip()
+    if not ot:
+        raise HTTPException(status_code=400, detail="Debes ingresar una OT válida.")
+    if not req.actividad_id:
+        raise HTTPException(status_code=400, detail="No se recibió actividad_id.")
+
+    try:
+        resp = (
+            supabase.table("pms_actividades")
+            .update({"ot_grafo": ot})
+            .eq("id", req.actividad_id)
+            .execute()
+        )
+        return {"ok": True, "actividad_id": req.actividad_id, "ot_nueva": ot, "data": resp.data}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo actualizar la OT: {exc}")
 
