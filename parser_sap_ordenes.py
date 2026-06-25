@@ -92,6 +92,38 @@ def extraer_numero_y_descripcion(value: Any) -> Tuple[str, str]:
     return numero, descripcion
 
 
+
+
+def extraer_codigo_plan_pm(value: Any) -> str:
+    """
+    Extrae el código de Plan PM desde campos SAP como:
+      ME_SR_PRUEBAS ELÉCTRICAS MOTOR MT TG7 (PTSRW7ME0349)
+    Retorna:
+      PTSRW7ME0349
+    """
+    txt = limpiar_texto(value).upper()
+    if not txt:
+        return ""
+
+    # Prioridad: código dentro de paréntesis. Ej.: (PTSRW7ME0349)
+    codigos_parentesis = re.findall(r"\(([A-Z]{2,}[A-Z0-9]{4,})\)", txt)
+    for codigo in codigos_parentesis:
+        # Evita capturar centros/ubicaciones cortas tipo PTSR si aparecieran solas.
+        if len(codigo) >= 8 and re.search(r"\d", codigo):
+            return codigo
+
+    # Fallback: código suelto tipo PTSRW7ME0349, PTXX..., etc.
+    # Requiere letras + números y longitud razonable.
+    candidatos = re.findall(r"\b([A-Z]{2,}[A-Z0-9]{6,})\b", txt)
+    for codigo in candidatos:
+        if len(codigo) >= 8 and re.search(r"\d", codigo):
+            # Evitar textos demasiado genéricos sin formato de código.
+            if codigo not in {"PLANIFICADO", "PROGRAMADO", "MANTENIMIENTO", "PREVENTIVO"}:
+                return codigo
+
+    return ""
+
+
 def fecha_a_texto(value: Any) -> Optional[str]:
     if _is_empty(value):
         return None
@@ -214,11 +246,30 @@ def parsear_ordenes_sap(ruta_excel: str, archivo_fuente: Optional[str] = None) -
         puesto = limpiar_texto(obtener(row, "Puesto de trabajo principal"))
         prioridad = limpiar_texto(obtener(row, "Prioridad", "Texto prioridad"))
 
+        plan_mantenimiento_raw = limpiar_texto(obtener(
+            row,
+            "Plan de mantenimiento preventivo",
+            "Plan de mantenimiento",
+            "Plan mant.",
+            "Plan mant",
+            "Plan PM",
+            "Código PM",
+            "Codigo PM",
+            "COD PM",
+        ))
+        plan_pm = extraer_codigo_plan_pm(plan_mantenimiento_raw)
+        descripcion_plan_mantenimiento = limpiar_texto(
+            obtener(row, "Descripción del plan de mantenimiento", "Descripcion del plan de mantenimiento")
+        )
+
         registro = {
             "numero_ot": numero_ot or None,
             "descripcion_ot": descripcion_ot or None,
             "numero_aviso": numero_aviso or None,
             "descripcion_aviso": descripcion_aviso or None,
+            "plan_pm": plan_pm or None,
+            "plan_mantenimiento": plan_mantenimiento_raw or None,
+            "descripcion_plan_mantenimiento": descripcion_plan_mantenimiento or None,
             "clase_orden": clase_orden or None,
             "tipo_mant_sap": clasificar_tipo_mant(clase_orden, descripcion_ot) or None,
             "central": central or None,
