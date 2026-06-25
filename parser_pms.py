@@ -26,6 +26,9 @@ HOJAS_EXCLUIR = [
     "DICCIONARIO",
     "TABLA",
     "MAESTRA",
+    "DISTRIBUCION",
+    "DISTRIBUCIÓN",
+    "DISTRIBUTION",
 ]
 
 CAMPOS = {
@@ -268,6 +271,58 @@ def limpiar_ot(valor):
         return v.split(".")[0]
 
     return re.sub(r"\D", "", v)
+
+
+def es_numero_pedido(valor):
+    """
+    Detecta números de pedido SAP informados en el PMS.
+    Patrones permitidos:
+    - 3500xxxx
+    - 4500xxxx
+
+    Se tratan como PEDIDO, no como OT inválida.
+    """
+    n = limpiar_ot(valor)
+    return bool(re.fullmatch(r"(3500|4500)\d{4,8}", n))
+
+
+def extraer_numero_pedido(valor):
+    n = limpiar_ot(valor)
+    return n if es_numero_pedido(n) else ""
+
+
+def actualizar_datos_originales_pedido_desde_ot(datos_originales, pedido_detectado):
+    """
+    Marca en datos_originales que el número de pedido fue detectado en OT/Grafo.
+    No borra el dato original; deja trazabilidad para que el generador PMS pueda
+    moverlo a la columna Pedido más adelante.
+    """
+    datos = json_seguro(datos_originales)
+
+    if not isinstance(datos, dict):
+        datos = {}
+
+    datos["pedido_detectado_en_ot"] = True
+    datos["numero_pedido_detectado"] = pedido_detectado
+
+    campos_detectados = datos.get("campos_detectados")
+    if not isinstance(campos_detectados, dict):
+        campos_detectados = {}
+        datos["campos_detectados"] = campos_detectados
+
+    campos_detectados["pedido"] = pedido_detectado
+
+    mapa_campos = datos.get("mapa_campos")
+    columnas_excel = datos.get("columnas_excel")
+
+    if isinstance(mapa_campos, dict) and isinstance(columnas_excel, dict):
+        info_pedido = mapa_campos.get("pedido")
+        if isinstance(info_pedido, dict):
+            col_letra = info_pedido.get("col_letra")
+            if col_letra:
+                columnas_excel[col_letra] = pedido_detectado
+
+    return datos
 
 
 def convertir_a_str_seguro(valor):
@@ -520,7 +575,42 @@ def fila_tiene_datos(row_dict):
     return len(valores_no_vacios) >= 3
 
 
-def construir_datos_originales(nombre_hoja, fila_excel, fila, campos):
+def detectar_central_en_hoja(ws, nombre_hoja, max_filas=15, max_columnas=20):
+    """
+    Detecta la central real de la hoja leyendo el contenido superior.
+    Esto evita confiar ciegamente en el nombre de la pestaña, porque algunos
+    proveedores pueden nombrar una hoja como Ventanilla aunque el contenido sea
+    de Santa Rosa, o viceversa.
+    """
+    textos = [limpiar_valor(nombre_hoja)]
+
+    max_row = min(ws.max_row or 1, max_filas)
+    max_col = min(ws.max_column or 1, max_columnas)
+
+    for fila in ws.iter_rows(
+        min_row=1,
+        max_row=max_row,
+        min_col=1,
+        max_col=max_col,
+        values_only=True,
+    ):
+        for valor in fila:
+            v = limpiar_valor(valor)
+            if v:
+                textos.append(v)
+
+    texto = " ".join(textos)
+
+    if "SANTA ROSA" in texto or "CTSR" in texto or "C.T. SANTA ROSA" in texto or "CCTT SANTA ROSA" in texto:
+        return "SANTA ROSA"
+
+    if "VENTANILLA" in texto or "CTVE" in texto or "C.C. VENTANILLA" in texto or "C.T. VENTANILLA" in texto:
+        return "VENTANILLA"
+
+    return ""
+
+
+def construir_datos_originales(nombre_hoja, fila_excel, fila, campos, central_hoja_detectada=""):
     """
     Guarda la fila completa original para luego reconstruir el Excel consolidado.
 
@@ -557,6 +647,7 @@ def construir_datos_originales(nombre_hoja, fila_excel, fila, campos):
 
     return {
         "hoja": nombre_hoja,
+        "central_hoja_detectada": central_hoja_detectada,
         "fila_excel": fila_excel,
         "columnas_excel": columnas_excel,
         "campos_detectados": campos_detectados,
@@ -584,6 +675,8 @@ def extraer_actividades(nombre_archivo):
         if not hoja_valida_para_programa(nombre_hoja):
             continue
 
+        central_hoja_detectada = detectar_central_en_hoja(ws, nombre_hoja)
+
         det = detectar_encabezado_en_hoja(ws)
 
         if not det:
@@ -595,6 +688,7 @@ def extraer_actividades(nombre_archivo):
         hojas_revisadas.append({
             "hoja": nombre_hoja,
             "estado": estado_hoja,
+            "central_hoja_detectada": central_hoja_detectada,
             "fila_encabezado": fila_header,
             "campos_detectados": ", ".join(campos.keys()),
         })
@@ -614,6 +708,7 @@ def extraer_actividades(nombre_archivo):
         ):
             row_dict = {
                 "hoja": nombre_hoja,
+                "central_hoja_detectada": central_hoja_detectada,
                 "fila_excel": fila_idx,
             }
 
@@ -630,6 +725,7 @@ def extraer_actividades(nombre_archivo):
                 fila_excel=fila_idx,
                 fila=fila,
                 campos=campos,
+                central_hoja_detectada=central_hoja_detectada,
             )
 
             if fila_tiene_datos(row_dict):
@@ -645,6 +741,7 @@ def extraer_actividades(nombre_archivo):
 
     columnas_ordenadas = [
         "hoja",
+        "central_hoja_detectada",
         "fila_excel",
         "proveedor",
         "ot_grafo",
@@ -848,6 +945,9 @@ def validar_ot(valor):
 
     if not re.fullmatch(r"\d+", v_limpio):
         return "INVALIDA", v_limpio
+
+    if es_numero_pedido(v_limpio):
+        return "PEDIDO_EN_CAMPO_OT", v_limpio
 
     if len(v_limpio) not in (8, 9):
         return "LONGITUD_INVALIDA", v_limpio
@@ -1532,6 +1632,20 @@ def generar_observaciones_forma(df):
                     ),
                 )
 
+        elif estado_ot == "PEDIDO_EN_CAMPO_OT":
+            agregar_obs(
+                observaciones,
+                row,
+                campo="ot_grafo",
+                nivel="ADVERTENCIA",
+                observacion="Número de pedido informado en columna OT/Grafo.",
+                valor=row.get("ot_grafo", ""),
+                sugerencia=(
+                    "El número informado tiene patrón de pedido SAP (3500xxxx o 4500xxxx). "
+                    "Debe trasladarse a la columna N° Pedido y confirmar si existe una OT real asociada."
+                ),
+            )
+
         elif estado_ot == "LONGITUD_INVALIDA":
             agregar_obs(
                 observaciones,
@@ -1848,6 +1962,7 @@ def preparar_datos_parser(
     columnas_minimas = [
         "proveedor",
         "hoja",
+        "central_hoja_detectada",
         "central",
         "unidad",
         "sistema",
@@ -1863,6 +1978,9 @@ def preparar_datos_parser(
         "hora_inicio",
         "hora_fin",
         "cod_pm_aviso",
+        "pedido",
+        "numero_pedido",
+        "ot_original_informada",
         "datos_originales",
     ]
 
@@ -1876,10 +1994,23 @@ def preparar_datos_parser(
     def inferir_central_desde_hoja(row):
         central = row.get("central", "")
         hoja = row.get("hoja", "")
+        central_hoja = row.get("central_hoja_detectada", "")
 
+        # 1) Si la fila tiene columna Central, manda la fila.
         if not esta_vacio(central):
             return central
 
+        # 2) Si el encabezado/contenido superior de la hoja declara central, usarlo.
+        #    Esto es más confiable que el nombre de la pestaña.
+        if not esta_vacio(central_hoja):
+            return central_hoja
+
+        # 3) Si el proveedor declaró central en la web y la fila no trae central,
+        #    asumir esa central. Esto cubre casos donde la hoja está mal nombrada.
+        if central_presentada:
+            return central_presentada
+
+        # 4) Fallback histórico: usar nombre de hoja solo si no hay otra señal.
         hoja_limpia = limpiar_valor(hoja)
 
         if "SANTA ROSA" in hoja_limpia:
@@ -1908,6 +2039,28 @@ def preparar_datos_parser(
             df_limpio[col] = df_limpio[col].apply(convertir_a_str_seguro)
 
     df_limpio["datos_originales"] = df_limpio["datos_originales"].apply(json_seguro)
+
+    # Detectar pedidos SAP informados en columna Pedido o por error en OT/Grafo.
+    # No se borra todavía la OT informada: se conserva para validación y trazabilidad.
+    if "pedido" not in df_limpio.columns:
+        df_limpio["pedido"] = ""
+
+    df_limpio["ot_original_informada"] = df_limpio["ot_grafo"].apply(convertir_a_str_seguro)
+    df_limpio["numero_pedido"] = df_limpio.apply(
+        lambda row: (
+            extraer_numero_pedido(row.get("pedido", ""))
+            or extraer_numero_pedido(row.get("ot_grafo", ""))
+        ),
+        axis=1,
+    )
+
+    for idx, row in df_limpio.iterrows():
+        pedido_detectado = extraer_numero_pedido(row.get("ot_grafo", ""))
+        if pedido_detectado:
+            df_limpio.at[idx, "datos_originales"] = actualizar_datos_originales_pedido_desde_ot(
+                row.get("datos_originales", {}),
+                pedido_detectado,
+            )
 
     cols_dedup = [
         "central",
@@ -1945,6 +2098,15 @@ def preparar_datos_parser(
     # Autocompleta condición E/S o F/S para actividades COND cuando el texto permite inferirlo.
     # Esto reduce observaciones menores y permite que el PMS único salga más completo.
     df_base_validable = autocompletar_condiciones_cond(df_base_validable)
+
+    # Filtrar por la central declarada en la web.
+    # Esto evita que se validen hojas de Ventanilla/Distribución cuando el proveedor
+    # registró el PMS para Santa Rosa, y viceversa.
+    central_declarada_norm_pre = normalizar_central_operativa(central_presentada)
+    if central_declarada_norm_pre and "central_norm" in df_base_validable.columns:
+        df_base_validable = df_base_validable[
+            df_base_validable["central_norm"].apply(normalizar_central_operativa) == central_declarada_norm_pre
+        ].copy()
 
     if df_base_validable.empty:
         detalle_observaciones = [{
@@ -2062,6 +2224,8 @@ def preparar_datos_parser(
             "equipo": convertir_a_str_seguro(r.get("equipo", "")),
             "actividad": convertir_a_str_seguro(r.get("motivo", "")),
             "ot_grafo": convertir_a_str_seguro(r.get("ot_grafo", "")),
+            "numero_pedido": convertir_a_str_seguro(r.get("numero_pedido", "")),
+            "ot_original_informada": convertir_a_str_seguro(r.get("ot_original_informada", "")),
             "tipo_mant": convertir_a_str_seguro(r.get("tipo_mant", "")),
             "condicion": convertir_a_str_seguro(r.get("condicion", "")),
             "riesgo": convertir_a_str_seguro(r.get("riesgo", "")),
@@ -2075,6 +2239,9 @@ def preparar_datos_parser(
             "hoja",
             "cod_pm_aviso",
             "pedido",
+            "numero_pedido",
+            "ot_original_informada",
+            "central_hoja_detectada",
             "area_solicitante",
             "recursos",
             "hora_inicio",
