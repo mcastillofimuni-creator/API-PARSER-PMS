@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from supabase import create_client, Client
 from parser_pms import preparar_datos_parser
 from generador_programa import generar_programa_unico
 from generador_acta import generar_acta_interferencias
+from parser_sap_ordenes import parsear_ordenes_sap
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -93,6 +94,12 @@ class GenerarActaRequest(BaseModel):
     acciones: List[ActaAccion] = []
 
 
+class ValidarSapRequest(BaseModel):
+    semana: str
+    central: str
+
+
+
 @app.get("/")
 def root():
     return {
@@ -104,6 +111,8 @@ def root():
             "/validar-pms",
             "/generar-programa-unico",
             "/generar-acta-interferencias",
+            "/cargar-maestro-sap",
+            "/validar-pms-contra-sap",
         ],
     }
 
@@ -526,5 +535,360 @@ def generar_acta_interferencias_endpoint(req: GenerarActaRequest):
         raise HTTPException(
             status_code=500,
             detail=f"No se pudo generar el acta de interferencias: {exc}",
+        )
+
+
+
+# ─── Maestro SAP OT/Avisos ───
+
+def extraer_numeros_sap(valor: Any) -> List[str]:
+    """Extrae posibles números SAP desde OT/Grafo, aviso o texto libre."""
+    import re
+
+    if valor is None:
+        return []
+    texto = str(valor).strip()
+    if not texto:
+        return []
+    numeros = re.findall(r"\d{6,12}", texto)
+    vistos = []
+    for n in numeros:
+        if n not in vistos:
+            vistos.append(n)
+    return vistos
+
+
+def normalizar_central_backend(valor: Any) -> str:
+    txt = str(valor or "").upper()
+    if "SANTA ROSA" in txt:
+        return "SANTA ROSA"
+    if "VENTANILLA" in txt:
+        return "VENTANILLA"
+    return txt.strip()
+
+
+def buscar_valor_en_raw(raw: Any, posibles_claves: List[str]) -> str:
+    if not isinstance(raw, dict):
+        return ""
+
+    def norm(x: Any) -> str:
+        import unicodedata
+        t = str(x or "").upper()
+        t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+        return "".join(ch if ch.isalnum() else "_" for ch in t).strip("_")
+
+    mapa = {norm(k): v for k, v in raw.items()}
+    for k in posibles_claves:
+        nk = norm(k)
+        if nk in mapa and mapa[nk] not in (None, ""):
+            return str(mapa[nk])
+    return ""
+
+
+def insertar_en_lotes(tabla: str, filas: List[Dict[str, Any]], lote: int = 400):
+    for i in range(0, len(filas), lote):
+        supabase.table(tabla).insert(filas[i:i + lote]).execute()
+
+
+@app.post("/cargar-maestro-sap")
+async def cargar_maestro_sap(file: UploadFile = File(...)):
+    """
+    Carga el Excel SAP de Órdenes de mantenimiento y reemplaza el maestro vigente.
+
+    Guarda datos en sap_ordenes_avisos:
+    - numero_ot / descripcion_ot
+    - numero_aviso / descripcion_aviso
+    - central
+    - estado_orden / estado_sistema / estado_control
+    - objeto técnico, equipo, ubicación técnica y fechas principales
+    """
+    nombre = file.filename or "ordenes_sap.xlsx"
+    suffix = Path(nombre).suffix or ".xlsx"
+    ruta_local = None
+
+    try:
+        contenido = await file.read()
+        if not contenido:
+            raise HTTPException(status_code=400, detail="El archivo está vacío.")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(contenido)
+        tmp.flush()
+        tmp.close()
+        ruta_local = tmp.name
+
+        resultado = parsear_ordenes_sap(ruta_local, archivo_fuente=nombre)
+        registros = resultado.get("registros") or []
+
+        if not registros:
+            raise HTTPException(status_code=400, detail="No se encontraron OT/Avisos válidos en el Excel SAP.")
+
+        # Reemplazo total del maestro. Simple y limpio para la carga semanal.
+        try:
+            supabase.table("sap_ordenes_avisos").delete().gte(
+                "fecha_carga", "1900-01-01T00:00:00+00:00"
+            ).execute()
+        except Exception:
+            # Fallback por si alguna fila antigua no tuviera fecha_carga.
+            supabase.table("sap_ordenes_avisos").delete().neq(
+                "numero_ot", "__NO_EXISTE__"
+            ).execute()
+
+        insertar_en_lotes("sap_ordenes_avisos", registros, lote=300)
+
+        return {
+            "ok": True,
+            "archivo_fuente": nombre,
+            **(resultado.get("resumen") or {}),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo cargar el maestro SAP: {exc}",
+        )
+    finally:
+        if ruta_local:
+            try:
+                os.remove(ruta_local)
+            except Exception:
+                pass
+
+
+def buscar_sap_por_campo(campo: str, numero: str) -> Optional[Dict[str, Any]]:
+    if not numero:
+        return None
+    resp = (
+        supabase.table("sap_ordenes_avisos")
+        .select("*")
+        .eq(campo, numero)
+        .limit(1)
+        .execute()
+    )
+    data = resp.data or []
+    return data[0] if data else None
+
+
+def construir_observacion_sap(
+    *,
+    actividad: Dict[str, Any],
+    req: ValidarSapRequest,
+    numero: str,
+    campo_origen: str,
+    nivel: str,
+    tipo: str,
+    detalle: str,
+    sugerencia: str,
+    sap_row: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "semana": req.semana,
+        "central": normalizar_central_backend(req.central),
+        "pms_archivo_id": actividad.get("pms_archivo_id"),
+        "actividad_id": actividad.get("id"),
+        "fila_excel": actividad.get("fila_excel"),
+        "proveedor": actividad.get("proveedor"),
+        "actividad": actividad.get("actividad"),
+        "numero_informado": numero,
+        "campo_origen": campo_origen,
+        "nivel": nivel,
+        "tipo_observacion": tipo,
+        "detalle": detalle,
+        "sugerencia": sugerencia,
+        "numero_ot_sap": (sap_row or {}).get("numero_ot"),
+        "numero_aviso_sap": (sap_row or {}).get("numero_aviso"),
+        "estado_control": (sap_row or {}).get("estado_control"),
+        "descripcion_sap": (sap_row or {}).get("descripcion_ot") or (sap_row or {}).get("descripcion_aviso"),
+    }
+
+
+@app.post("/validar-pms-contra-sap")
+def validar_pms_contra_sap(req: ValidarSapRequest):
+    """
+    Valida las actividades PMS contra el maestro sap_ordenes_avisos ya cargado.
+
+    Primera versión:
+    - OT existe como OT.
+    - Número puesto como OT pero existe como Aviso.
+    - OT no encontrada.
+    - OT cerrada/borrada.
+    - OT de otra central.
+    - Aviso informado sin OT/Grafo.
+    """
+    central_req = normalizar_central_backend(req.central)
+
+    try:
+        actividades_resp = (
+            supabase.table("pms_actividades")
+            .select("*")
+            .eq("semana", req.semana)
+            .execute()
+        )
+        actividades = actividades_resp.data or []
+
+        actividades = [
+            a for a in actividades
+            if not central_req or normalizar_central_backend(a.get("central")) == central_req
+        ]
+
+        # Borra observaciones SAP previas de la misma semana/central.
+        try:
+            supabase.table("pms_observaciones_sap").delete().eq("semana", req.semana).eq("central", central_req).execute()
+        except Exception:
+            pass
+
+        observaciones: List[Dict[str, Any]] = []
+        ok_ot = 0
+        ot_cerrada = 0
+        ot_otra_central = 0
+        aviso_como_ot = 0
+        ot_no_encontrada = 0
+        aviso_sin_ot = 0
+
+        for act in actividades:
+            raw = act.get("datos_originales") or {}
+            ot_valor = act.get("ot_grafo") or buscar_valor_en_raw(raw, [
+                "N°OT / GRAFO", "N°OT / PEDIDO", "N° OT", "OT", "ORDEN", "NºOT / GRAFO"
+            ])
+            aviso_valor = act.get("cod_pm_aviso") or buscar_valor_en_raw(raw, [
+                "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
+            ])
+
+            numeros_ot = extraer_numeros_sap(ot_valor)
+            numeros_aviso = extraer_numeros_sap(aviso_valor)
+
+            if numeros_ot:
+                for numero in numeros_ot:
+                    sap_ot = buscar_sap_por_campo("numero_ot", numero)
+                    if sap_ot:
+                        estado = str(sap_ot.get("estado_control") or "")
+                        central_sap = normalizar_central_backend(sap_ot.get("central"))
+
+                        if estado in {"CERRADO_TEC", "BORRADO", "COMPLETADO_EMPRESA"}:
+                            ot_cerrada += 1
+                            observaciones.append(construir_observacion_sap(
+                                actividad=act,
+                                req=req,
+                                numero=numero,
+                                campo_origen="ot_grafo",
+                                nivel="ADVERTENCIA" if estado != "BORRADO" else "ERROR",
+                                tipo="OT con estado no operativo",
+                                detalle=f"La OT existe en SAP, pero figura con estado {estado}.",
+                                sugerencia="Verificar si corresponde programarla o si debe reemplazarse por una OT vigente/liberada.",
+                                sap_row=sap_ot,
+                            ))
+                        elif central_req and central_sap and central_sap != central_req:
+                            ot_otra_central += 1
+                            observaciones.append(construir_observacion_sap(
+                                actividad=act,
+                                req=req,
+                                numero=numero,
+                                campo_origen="ot_grafo",
+                                nivel="ADVERTENCIA",
+                                tipo="OT pertenece a otra central",
+                                detalle=f"La OT existe en SAP, pero pertenece a {central_sap}.",
+                                sugerencia="Confirmar si la OT corresponde al PMS de la central filtrada.",
+                                sap_row=sap_ot,
+                            ))
+                        else:
+                            ok_ot += 1
+                        continue
+
+                    sap_aviso = buscar_sap_por_campo("numero_aviso", numero)
+                    if sap_aviso:
+                        aviso_como_ot += 1
+                        sugerida = sap_aviso.get("numero_ot")
+                        observaciones.append(construir_observacion_sap(
+                            actividad=act,
+                            req=req,
+                            numero=numero,
+                            campo_origen="ot_grafo",
+                            nivel="ADVERTENCIA",
+                            tipo="Aviso colocado como OT",
+                            detalle="El número informado en OT/Grafo no existe como OT, pero sí existe como Aviso SAP.",
+                            sugerencia=(
+                                f"Revisar en SAP y reemplazar por la OT asociada {sugerida}."
+                                if sugerida else
+                                "Revisar en SAP la OT asociada al aviso."
+                            ),
+                            sap_row=sap_aviso,
+                        ))
+                        continue
+
+                    ot_no_encontrada += 1
+                    observaciones.append(construir_observacion_sap(
+                        actividad=act,
+                        req=req,
+                        numero=numero,
+                        campo_origen="ot_grafo",
+                        nivel="ERROR",
+                        tipo="Número no encontrado en SAP",
+                        detalle="El número informado no fue encontrado como OT ni como Aviso en el maestro SAP cargado.",
+                        sugerencia="Verificar si el número fue digitado correctamente o si falta actualizar el maestro SAP.",
+                    ))
+
+            elif numeros_aviso:
+                for numero in numeros_aviso:
+                    sap_aviso = buscar_sap_por_campo("numero_aviso", numero)
+                    if sap_aviso:
+                        aviso_sin_ot += 1
+                        sugerida = sap_aviso.get("numero_ot")
+                        observaciones.append(construir_observacion_sap(
+                            actividad=act,
+                            req=req,
+                            numero=numero,
+                            campo_origen="cod_pm_aviso",
+                            nivel="ADVERTENCIA",
+                            tipo="Aviso informado sin OT/Grafo",
+                            detalle="La actividad tiene Aviso/COD PM informado, pero no tiene OT/Grafo.",
+                            sugerencia=(
+                                f"Completar la OT/Grafo asociada: {sugerida}."
+                                if sugerida else
+                                "Buscar en SAP la OT asociada al aviso."
+                            ),
+                            sap_row=sap_aviso,
+                        ))
+                    else:
+                        observaciones.append(construir_observacion_sap(
+                            actividad=act,
+                            req=req,
+                            numero=numero,
+                            campo_origen="cod_pm_aviso",
+                            nivel="ADVERTENCIA",
+                            tipo="Aviso no encontrado en SAP",
+                            detalle="El número informado como Aviso/COD PM no fue encontrado en el maestro SAP cargado.",
+                            sugerencia="Verificar número o actualizar el maestro SAP.",
+                        ))
+
+        if observaciones:
+            insertar_en_lotes("pms_observaciones_sap", observaciones, lote=300)
+
+        resumen = {
+            "actividades_revisadas": len(actividades),
+            "ots_validas": ok_ot,
+            "avisos_colocados_como_ot": aviso_como_ot,
+            "ots_no_encontradas": ot_no_encontrada,
+            "ots_estado_no_operativo": ot_cerrada,
+            "ots_otra_central": ot_otra_central,
+            "avisos_sin_ot": aviso_sin_ot,
+            "observaciones_generadas": len(observaciones),
+        }
+
+        return {
+            "ok": True,
+            "semana": req.semana,
+            "central": central_req,
+            **resumen,
+            "observaciones": observaciones[:50],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo validar PMS contra SAP: {exc}",
         )
 
