@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ from supabase import create_client, Client
 
 from parser_pms import preparar_datos_parser
 from generador_programa import generar_programa_unico
+from generador_acta import generar_acta_interferencias
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -58,6 +59,40 @@ class GenerarProgramaRequest(BaseModel):
     central: str
 
 
+class ActaEmpresa(BaseModel):
+    empresa: str = ""
+    expositor: str = ""
+    contrato: str = ""
+    estado_validacion: str = ""
+    programo: List[str] = []
+    presento: List[str] = []
+    archivo: str = ""
+
+
+class ActaParticipante(BaseModel):
+    nombre: str = ""
+    contrato: str = ""
+    empresa: str = ""
+
+
+class ActaAccion(BaseModel):
+    accion: str = ""
+    responsable: str = ""
+
+
+class GenerarActaRequest(BaseModel):
+    semana: str
+    pms: str = ""
+    rango_semana: str = ""
+    fecha_reunion: str = ""
+    central: str
+    notas: str = ""
+    empresas: List[ActaEmpresa] = []
+    faltantes: List[str] = []
+    participantes_adicionales: List[ActaParticipante] = []
+    acciones: List[ActaAccion] = []
+
+
 @app.get("/")
 def root():
     return {
@@ -68,6 +103,7 @@ def root():
             "/health",
             "/validar-pms",
             "/generar-programa-unico",
+            "/generar-acta-interferencias",
         ],
     }
 
@@ -459,3 +495,36 @@ def generar_programa_unico_endpoint(req: GenerarProgramaRequest):
             status_code=500,
             detail=f"No se pudo generar el programa único: {exc}",
         )
+
+
+@app.post("/generar-acta-interferencias")
+def generar_acta_interferencias_endpoint(req: GenerarActaRequest):
+    """
+    Genera un Word oficial de acta de reunión de interferencias usando:
+    PLANTILLA_ACTA_INTERFERENCIAS_BASE.docx
+
+    No usa IA externa. Rellena la plantilla con:
+    - fecha
+    - central
+    - participantes
+    - observaciones
+    - acciones acordadas
+    """
+    try:
+        resultado = generar_acta_interferencias(req.model_dump())
+
+        archivo_generado = resultado["archivo_generado"]
+        nombre_archivo = resultado["nombre_archivo"]
+
+        return FileResponse(
+            path=archivo_generado,
+            filename=nombre_archivo,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo generar el acta de interferencias: {exc}",
+        )
+
