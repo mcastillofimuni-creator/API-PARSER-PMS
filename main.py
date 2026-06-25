@@ -13,6 +13,7 @@ from parser_pms import preparar_datos_parser
 from generador_programa import generar_programa_unico
 from generador_acta import generar_acta_interferencias
 from parser_sap_ordenes import parsear_ordenes_sap
+from parser_sap_avisos import parsear_avisos_sap
 from rapidfuzz import fuzz
 
 
@@ -925,6 +926,53 @@ def _indexar_registros_sap(registros: List[Dict[str, Any]]):
     return por_ot, por_aviso
 
 
+def _normalizar_aviso_para_control(registro_aviso: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convierte una fila del parser de avisos al formato común usado por Control SAP.
+    Así se puede cruzar: número informado -> aviso -> OT asociada.
+    """
+    return {
+        "numero_ot": registro_aviso.get("numero_ot_asociada"),
+        "descripcion_ot": registro_aviso.get("descripcion_ot_asociada") or registro_aviso.get("descripcion_aviso"),
+        "numero_aviso": registro_aviso.get("numero_aviso"),
+        "descripcion_aviso": registro_aviso.get("descripcion_aviso"),
+        "central": registro_aviso.get("central"),
+        "estado_control": registro_aviso.get("estado_control"),
+        "objeto_tecnico": registro_aviso.get("objeto_tecnico"),
+        "descripcion_objeto_tecnico": registro_aviso.get("descripcion_objeto_tecnico"),
+        "equipo": registro_aviso.get("equipo"),
+        "ubicacion_tecnica": registro_aviso.get("ubicacion_tecnica"),
+        "plan_pm": registro_aviso.get("plan_pm"),
+        "archivo_fuente": registro_aviso.get("archivo_fuente"),
+        "fila_sap": registro_aviso.get("fila_sap"),
+        "raw_data": registro_aviso.get("raw_data") or {},
+        "fuente_sap": "AVISOS",
+    }
+
+
+def _fusionar_indices_sap(registros_ordenes: List[Dict[str, Any]], registros_avisos: List[Dict[str, Any]]):
+    """
+    Arma índices por OT y por Aviso usando ambos Excel.
+    Prioridad de OT: archivo de órdenes.
+    Prioridad de Aviso: archivo de avisos, porque suele traer mejor trazabilidad del aviso.
+    """
+    registros_avisos_norm = [_normalizar_aviso_para_control(r) for r in registros_avisos]
+
+    por_ot, por_aviso = _indexar_registros_sap(registros_ordenes)
+    por_ot_av, por_aviso_av = _indexar_registros_sap(registros_avisos_norm)
+
+    for ot, row in por_ot_av.items():
+        if ot and ot not in por_ot:
+            por_ot[ot] = row
+
+    for av, row in por_aviso_av.items():
+        if av:
+            por_aviso[av] = row
+
+    registros_para_sugerencia = registros_ordenes + [r for r in registros_avisos_norm if r.get("numero_ot")]
+    return por_ot, por_aviso, registros_para_sugerencia
+
+
 
 def _es_pedido_sap(numero: Any) -> bool:
     """Pedido/OC típico usado en PMS: 3500xxxx o 4500xxxx."""
@@ -1117,33 +1165,55 @@ async def control_sap_validar_ots(
     password: str = Form(...),
     semana: str = Form(...),
     central: str = Form(...),
-    file: UploadFile = File(...),
+    file_ordenes: Optional[UploadFile] = File(None),
+    file_avisos: Optional[UploadFile] = File(None),
+    file: Optional[UploadFile] = File(None),  # compatibilidad con la versión anterior
 ):
     """
-    Panel privado: recibe Excel SAP, valida contra pms_actividades de la semana/central,
-    y devuelve una tabla comparativa sin modificar el PMS.
+    Panel privado: recibe Excel SAP de Órdenes y, opcionalmente, Excel SAP de Avisos.
+    Cruza ambos en memoria contra pms_actividades de la semana/central.
+    No modifica el PMS.
     """
     _validar_password_sap(password)
     central_req = normalizar_central_backend(central)
 
-    nombre = file.filename or "ordenes_sap.xlsx"
-    suffix = Path(nombre).suffix or ".xlsx"
-    ruta_local = None
+    archivo_ordenes = file_ordenes or file
+    archivo_avisos = file_avisos
 
-    try:
-        contenido = await file.read()
+    if not archivo_ordenes:
+        raise HTTPException(status_code=400, detail="Debes cargar el Excel SAP de Órdenes de mantenimiento.")
+
+    rutas_tmp: List[str] = []
+
+    async def _guardar_upload(upload: UploadFile, nombre_default: str) -> str:
+        contenido = await upload.read()
         if not contenido:
-            raise HTTPException(status_code=400, detail="El archivo SAP está vacío.")
-
+            raise HTTPException(status_code=400, detail=f"El archivo {upload.filename or nombre_default} está vacío.")
+        suffix = Path(upload.filename or nombre_default).suffix or ".xlsx"
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp.write(contenido)
         tmp.flush()
         tmp.close()
-        ruta_local = tmp.name
+        rutas_tmp.append(tmp.name)
+        return tmp.name
 
-        resultado_sap = parsear_ordenes_sap(ruta_local, archivo_fuente=nombre)
-        registros_sap = resultado_sap.get("registros") or []
-        por_ot, por_aviso = _indexar_registros_sap(registros_sap)
+    try:
+        nombre_ordenes = archivo_ordenes.filename or "ordenes_sap.xlsx"
+        ruta_ordenes = await _guardar_upload(archivo_ordenes, "ordenes_sap.xlsx")
+        resultado_ordenes = parsear_ordenes_sap(ruta_ordenes, archivo_fuente=nombre_ordenes)
+        registros_ordenes = resultado_ordenes.get("registros") or []
+
+        resultado_avisos = {"resumen": {}, "registros": []}
+        registros_avisos = []
+        nombre_avisos = ""
+
+        if archivo_avisos:
+            nombre_avisos = archivo_avisos.filename or "avisos_sap.xlsx"
+            ruta_avisos = await _guardar_upload(archivo_avisos, "avisos_sap.xlsx")
+            resultado_avisos = parsear_avisos_sap(ruta_avisos, archivo_fuente=nombre_avisos)
+            registros_avisos = resultado_avisos.get("registros") or []
+
+        por_ot, por_aviso, registros_sap = _fusionar_indices_sap(registros_ordenes, registros_avisos)
 
         actividades_resp = (
             supabase.table("pms_actividades")
@@ -1166,7 +1236,45 @@ async def control_sap_validar_ots(
             "sin_numero": 0,
             "sugeridas": 0,
             "estado_no_operativo": 0,
+            "avisos_sin_ot": 0,
         }
+
+        def _fila_base(act: Dict[str, Any], numero: str, aviso_detectado: str, pedido_detectado_base: str, campo_origen: str) -> Dict[str, Any]:
+            return {
+                "actividad_id": act.get("id"),
+                "pms_archivo_id": act.get("pms_archivo_id"),
+                "empresa": act.get("proveedor"),
+                "fila_excel": act.get("fila_excel"),
+                "numero_pms": numero,
+                "aviso_pms": aviso_detectado,
+                "pedido_pms": pedido_detectado_base,
+                "pedido_detectado": numero if _es_pedido_sap(numero) else pedido_detectado_base,
+                "campo_origen": campo_origen,
+                "actividad_pms": act.get("actividad"),
+                "unidad_pms": act.get("unidad"),
+                "sistema_pms": act.get("sistema"),
+                "equipo_pms": act.get("equipo"),
+            }
+
+        def _completar_con_row_sap(base: Dict[str, Any], row: Dict[str, Any], estado_fila: str, obs: str, score: int = 100) -> Dict[str, Any]:
+            numero = base.get("numero_pms") or ""
+            return {
+                **base,
+                "estado": estado_fila,
+                "observacion": obs,
+                "ot_sap": row.get("numero_ot") or "",
+                "aviso_sap": row.get("numero_aviso") or "",
+                "cod_pm_sap": _cod_pm_o_aviso_sugerido(row),
+                "plan_pm_sap": _extraer_plan_pm_sap(row),
+                "pedido_sap": _extraer_pedido_sap(row),
+                "pedido_sugerido": (numero if _es_pedido_sap(numero) else base.get("pedido_detectado") or "") or _extraer_pedido_sap(row),
+                "cod_pm_sugerido": _cod_pm_o_aviso_sugerido(row),
+                "descripcion_sap": _descripcion_sap_referencial(row),
+                "ot_sugerida": row.get("numero_ot") or "",
+                "descripcion_sugerida": _descripcion_sap_referencial(row),
+                "score_sugerencia": score,
+                "estado_sap": row.get("estado_control") or "",
+            }
 
         for act in actividades:
             raw = act.get("datos_originales") or {}
@@ -1179,6 +1287,7 @@ async def control_sap_validar_ots(
             pedido_valor = act.get("numero_pedido") or buscar_valor_en_raw(raw, [
                 "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido", "Numero de pedido"
             ])
+
             aviso_detectado = ", ".join(extraer_numeros_sap(aviso_valor))
             pedido_detectado_base = ", ".join([n for n in extraer_numeros_sap(pedido_valor) if _es_pedido_sap(n)])
 
@@ -1194,20 +1303,9 @@ async def control_sap_validar_ots(
                     resumen["sugeridas"] += 1
                 else:
                     resumen["sin_numero"] += 1
+                base = _fila_base(act, "", aviso_detectado, pedido_detectado_base, "Sin número")
                 filas.append({
-                    "actividad_id": act.get("id"),
-                    "pms_archivo_id": act.get("pms_archivo_id"),
-                    "empresa": act.get("proveedor"),
-                    "fila_excel": act.get("fila_excel"),
-                    "numero_pms": "",
-                    "aviso_pms": aviso_detectado,
-                    "pedido_pms": pedido_detectado_base,
-                    "pedido_detectado": pedido_detectado_base,
-                    "campo_origen": "Sin número",
-                    "actividad_pms": act.get("actividad"),
-                    "unidad_pms": act.get("unidad"),
-                    "sistema_pms": act.get("sistema"),
-                    "equipo_pms": act.get("equipo"),
+                    **base,
                     "estado": "SIN_NUMERO",
                     "observacion": "La actividad no tiene OT ni Aviso identificable.",
                     "ot_sap": "",
@@ -1226,9 +1324,9 @@ async def control_sap_validar_ots(
                 continue
 
             for numero in numeros:
+                base = _fila_base(act, numero, aviso_detectado, pedido_detectado_base, campo_origen)
                 row_ot = por_ot.get(numero)
                 row_aviso = por_aviso.get(numero)
-                sugerida = {}
 
                 if row_ot:
                     estado = str(row_ot.get("estado_control") or "")
@@ -1240,70 +1338,28 @@ async def control_sap_validar_ots(
                         resumen["ots_ok"] += 1
                         estado_fila = "OK"
                         obs = "La OT informada existe en SAP."
-
-                    filas.append({
-                        "actividad_id": act.get("id"),
-                        "pms_archivo_id": act.get("pms_archivo_id"),
-                        "empresa": act.get("proveedor"),
-                        "fila_excel": act.get("fila_excel"),
-                        "numero_pms": numero,
-                        "aviso_pms": aviso_detectado,
-                        "pedido_pms": pedido_detectado_base,
-                        "pedido_detectado": numero if _es_pedido_sap(numero) else pedido_detectado_base,
-                        "campo_origen": campo_origen,
-                        "actividad_pms": act.get("actividad"),
-                        "unidad_pms": act.get("unidad"),
-                        "sistema_pms": act.get("sistema"),
-                        "equipo_pms": act.get("equipo"),
-                        "estado": estado_fila,
-                        "observacion": obs,
-                        "ot_sap": row_ot.get("numero_ot") or "",
-                        "aviso_sap": row_ot.get("numero_aviso") or "",
-                        "cod_pm_sap": _cod_pm_o_aviso_sugerido(row_ot),
-                        "plan_pm_sap": _extraer_plan_pm_sap(row_ot),
-                        "pedido_sap": _extraer_pedido_sap(row_ot),
-                        "pedido_sugerido": (numero if _es_pedido_sap(numero) else pedido_detectado_base) or _extraer_pedido_sap(row_ot),
-                        "cod_pm_sugerido": _cod_pm_o_aviso_sugerido(row_ot),
-                        "descripcion_sap": _descripcion_sap_referencial(row_ot),
-                        "ot_sugerida": row_ot.get("numero_ot") or "",
-                        "descripcion_sugerida": _descripcion_sap_referencial(row_ot),
-                        "score_sugerencia": 100,
-                        "estado_sap": estado,
-                    })
+                    filas.append(_completar_con_row_sap(base, row_ot, estado_fila, obs, 100))
                     continue
 
                 if row_aviso:
-                    resumen["avisos_como_ot"] += 1
                     sugerida_ot = row_aviso.get("numero_ot") or ""
-                    filas.append({
-                        "actividad_id": act.get("id"),
-                        "pms_archivo_id": act.get("pms_archivo_id"),
-                        "empresa": act.get("proveedor"),
-                        "fila_excel": act.get("fila_excel"),
-                        "numero_pms": numero,
-                        "aviso_pms": aviso_detectado,
-                        "pedido_pms": pedido_detectado_base,
-                        "pedido_detectado": numero if _es_pedido_sap(numero) else pedido_detectado_base,
-                        "campo_origen": campo_origen,
-                        "actividad_pms": act.get("actividad"),
-                        "unidad_pms": act.get("unidad"),
-                        "sistema_pms": act.get("sistema"),
-                        "equipo_pms": act.get("equipo"),
-                        "estado": "AVISO_COMO_OT",
-                        "observacion": "El número informado no existe como OT, pero sí existe como Aviso SAP.",
-                        "ot_sap": "",
-                        "aviso_sap": row_aviso.get("numero_aviso") or "",
-                        "cod_pm_sap": _cod_pm_o_aviso_sugerido(row_aviso),
-                        "plan_pm_sap": _extraer_plan_pm_sap(row_aviso),
-                        "pedido_sap": _extraer_pedido_sap(row_aviso),
-                        "pedido_sugerido": (numero if _es_pedido_sap(numero) else pedido_detectado_base) or _extraer_pedido_sap(row_aviso),
-                        "cod_pm_sugerido": _cod_pm_o_aviso_sugerido(row_aviso),
-                        "descripcion_sap": _descripcion_sap_referencial(row_aviso),
-                        "ot_sugerida": sugerida_ot,
-                        "descripcion_sugerida": row_aviso.get("descripcion_ot") or row_aviso.get("descripcion_aviso") or "",
-                        "score_sugerencia": 90 if sugerida_ot else 0,
-                        "estado_sap": row_aviso.get("estado_control") or "",
-                    })
+                    if sugerida_ot:
+                        resumen["avisos_como_ot"] += 1
+                        obs = "El número informado no existe como OT, pero sí existe como Aviso SAP con OT asociada."
+                    else:
+                        resumen["avisos_sin_ot"] += 1
+                        obs = "El número informado corresponde a un Aviso SAP, pero no tiene OT asociada en el archivo de avisos."
+                    fila = _completar_con_row_sap(
+                        base,
+                        row_aviso,
+                        "AVISO_COMO_OT" if sugerida_ot else "AVISO_SIN_OT",
+                        obs,
+                        90 if sugerida_ot else 70,
+                    )
+                    fila["aviso_sap"] = row_aviso.get("numero_aviso") or numero
+                    fila["cod_pm_sugerido"] = row_aviso.get("numero_aviso") or numero
+                    fila["ot_sugerida"] = sugerida_ot
+                    filas.append(fila)
                     continue
 
                 sugerida = _sugerir_ot_por_texto(act, registros_sap, central_req)
@@ -1311,23 +1367,10 @@ async def control_sap_validar_ots(
                     resumen["sugeridas"] += 1
                 else:
                     resumen["no_encontradas"] += 1
-
                 filas.append({
-                    "actividad_id": act.get("id"),
-                    "pms_archivo_id": act.get("pms_archivo_id"),
-                    "empresa": act.get("proveedor"),
-                    "fila_excel": act.get("fila_excel"),
-                    "numero_pms": numero,
-                    "aviso_pms": aviso_detectado,
-                    "pedido_pms": pedido_detectado_base,
-                    "pedido_detectado": numero if _es_pedido_sap(numero) else pedido_detectado_base,
-                    "campo_origen": campo_origen,
-                    "actividad_pms": act.get("actividad"),
-                    "unidad_pms": act.get("unidad"),
-                    "sistema_pms": act.get("sistema"),
-                    "equipo_pms": act.get("equipo"),
+                    **base,
                     "estado": "NO_ENCONTRADA",
-                    "observacion": "El número informado no fue encontrado como OT ni como Aviso en el Excel SAP cargado.",
+                    "observacion": "El número informado no fue encontrado como OT ni como Aviso en los Excel SAP cargados.",
                     "ot_sap": "",
                     "aviso_sap": sugerida.get("numero_aviso") or "",
                     "cod_pm_sap": sugerida.get("cod_pm_sugerido") or sugerida.get("plan_pm_sap") or sugerida.get("numero_aviso") or "",
@@ -1346,8 +1389,11 @@ async def control_sap_validar_ots(
             "ok": True,
             "semana": semana,
             "central": central_req,
-            "archivo_fuente": nombre,
-            "sap": resultado_sap.get("resumen") or {},
+            "archivo_fuente": nombre_ordenes,
+            "archivo_ordenes": nombre_ordenes,
+            "archivo_avisos": nombre_avisos,
+            "sap": resultado_ordenes.get("resumen") or {},
+            "sap_avisos": resultado_avisos.get("resumen") or {},
             "resumen": resumen,
             "filas": filas,
         }
@@ -1355,11 +1401,11 @@ async def control_sap_validar_ots(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se pudo validar OTs en Control SAP: {exc}")
+        raise HTTPException(status_code=500, detail=f"No se pudo validar OTs/Avisos en Control SAP: {exc}")
     finally:
-        if ruta_local:
+        for ruta in rutas_tmp:
             try:
-                os.remove(ruta_local)
+                os.remove(ruta)
             except Exception:
                 pass
 
