@@ -550,29 +550,42 @@ def detectar_encabezado_en_hoja(ws, max_filas=90, max_columnas=80, min_campos=5)
 # ============================================================
 
 def fila_tiene_datos(row_dict):
-    campos_utiles = [
-        "proveedor",
+    """
+    Determina si la fila parece una actividad real.
+
+    Ajuste importante:
+    No basta con que exista una descripción en MOTIVO. Algunos formatos tienen
+    bloques informativos como "ACTIVIDADES PROPUESTAS" o listas auxiliares
+    donde solo se llena MOTIVO + columnas de costo/comentario. Esas filas no
+    deben entrar al PMS ni a la validación SAP.
+    """
+    motivo = row_dict.get("motivo", "")
+
+    if esta_vacio(motivo):
+        return False
+
+    campos_operativos_fuertes = [
         "ot_grafo",
         "central",
         "unidad",
         "sistema",
         "equipo",
-        "motivo",
-        "condicion",
-        "riesgo",
-        "area_solicitante",
         "inspector",
         "rt_terceros",
+        "fecha_inicio",
+        "fecha_fin",
+        "hora_inicio",
+        "hora_fin",
     ]
 
-    valores_no_vacios = []
+    fuertes_no_vacios = [
+        c for c in campos_operativos_fuertes
+        if not esta_vacio(row_dict.get(c, ""))
+    ]
 
-    for c in campos_utiles:
-        v = row_dict.get(c, "")
-        if not esta_vacio(v):
-            valores_no_vacios.append(v)
-
-    return len(valores_no_vacios) >= 3
+    # Actividad real: motivo + al menos dos datos operativos fuertes.
+    # Evita filas de comentario/propuesta donde solo aparece la descripción.
+    return len(fuertes_no_vacios) >= 2
 
 
 def detectar_central_en_hoja(ws, nombre_hoja, max_filas=15, max_columnas=20):
@@ -870,58 +883,43 @@ def es_fila_actividad_real(row):
     inspector = limpiar_valor(row.get("inspector", ""))
     rt = limpiar_valor(row.get("rt_terceros", ""))
     ot = limpiar_valor(row.get("ot_grafo", ""))
+    fecha_inicio = limpiar_valor(row.get("fecha_inicio", ""))
+    fecha_fin = limpiar_valor(row.get("fecha_fin", ""))
+    hora_inicio = limpiar_valor(row.get("hora_inicio", ""))
+    hora_fin = limpiar_valor(row.get("hora_fin", ""))
 
     texto_total = " ".join([
-        proveedor,
-        central,
-        unidad,
-        sistema,
-        equipo,
-        motivo,
-        condicion,
-        inspector,
-        rt,
-        ot,
+        proveedor, central, unidad, sistema, equipo, motivo, condicion,
+        inspector, rt, ot, fecha_inicio, fecha_fin, hora_inicio, hora_fin,
     ])
 
     palabras_no_actividad = [
-        "TOTAL",
-        "SUBTOTAL",
-        "LEYENDA",
-        "OBSERVACION",
-        "OBSERVACIONES",
-        "SEMANA",
-        "PROGRAMA SEMANAL",
-        "NOTA",
-        "FORMULARIO",
-        "CLEAN SHEET",
-        "APROBADO",
-        "REVISADO",
-        "ELABORADO",
+        "TOTAL", "SUBTOTAL", "LEYENDA", "OBSERVACION", "OBSERVACIONES",
+        "SEMANA", "PROGRAMA SEMANAL", "NOTA", "FORMULARIO", "CLEAN SHEET",
+        "APROBADO", "REVISADO", "ELABORADO", "ACTIVIDADES PROPUESTAS",
+        "PENDIENTES / ADICIONALES",
     ]
 
     if any(p in texto_total for p in palabras_no_actividad):
         return False
 
-    campos_operativos = [
-        proveedor,
-        central,
-        unidad,
-        sistema,
-        equipo,
-        motivo,
-        condicion,
-        inspector,
-        rt,
-        ot,
+    if motivo in ["", "NONE", "NAN", "NA", "NULL", "N/A", "-", "EMPTY"]:
+        return False
+
+    # Una actividad real debe tener una descripción y al menos dos datos
+    # operativos fuertes. Esto evita que se lean bloques auxiliares/propuestos
+    # que no pertenecen al programa semanal validable.
+    campos_fuertes = [
+        central, unidad, sistema, equipo, inspector, rt, ot,
+        fecha_inicio, fecha_fin, hora_inicio, hora_fin,
     ]
 
-    llenos = [
-        c for c in campos_operativos
+    fuertes_llenos = [
+        c for c in campos_fuertes
         if c not in ["", "NONE", "NAN", "NA", "NULL", "N/A", "-", "EMPTY"]
     ]
 
-    return len(llenos) >= 3
+    return len(fuertes_llenos) >= 2
 
 
 # ============================================================
