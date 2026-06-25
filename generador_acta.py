@@ -36,6 +36,126 @@ def _normalizar_espacios(texto: str) -> str:
     return re.sub(r"\s+", " ", _safe_text(texto)).strip()
 
 
+
+
+ACRONIMOS = {
+    "PMS", "OT", "SAP", "HSE&Q", "HSEQ", "HSE", "I&C", "CT", "C.T.",
+    "JM", "JMI", "T&D", "KVSG", "SGS", "S.A.", "SAC", "S.A.C.", "S.A", "SRL", "S.R.L."
+}
+
+EMPRESA_MAP = {
+    "MAGNEX": "Magnex",
+    "JM INGENIEROS": "JM Ingenieros",
+    "JMI": "JMI",
+    "JIMSAO": "Jimsao",
+    "GERER L ENERGIE SAC": "Gerer L Energie S.A.C.",
+    "ULLOA": "Ulloa",
+    "ULLOA S.A": "Ulloa S.A.",
+    "ULLOA S.A.": "Ulloa S.A.",
+    "SEFREL": "Sefrel",
+    "UNITELEC": "Unitelec",
+    "DIM": "DIM",
+    "T&D ELECTRIC": "T&D Electric",
+    "MAQUIRENTAS": "Maquirentas",
+    "MAQUIRENTA": "Maquirenta",
+    "ORYGEN": "Orygen",
+}
+
+PALABRAS_MAP = {
+    "hseq": "HSE&Q",
+    "hse&q": "HSE&Q",
+    "hsq": "HSE&Q",
+    "hse": "HSE",
+    "orygen": "Orygen",
+    "mantto": "mantenimiento",
+    "pms": "PMS",
+    "sap": "SAP",
+    "ot": "OT",
+}
+
+
+def _formato_nombre(texto: Any) -> str:
+    """Nombres propios en modo oración: Manuel Castillo, no MANUEL CASTILLO."""
+    t = _normalizar_espacios(texto)
+    if not t:
+        return ""
+    partes = []
+    for palabra in t.split(" "):
+        if not palabra:
+            continue
+        up = palabra.upper()
+        if up in {"DE", "DEL", "LA", "LAS", "LOS", "Y"}:
+            partes.append(up.lower())
+        else:
+            partes.append(palabra[:1].upper() + palabra[1:].lower())
+    return " ".join(partes)
+
+
+def _formato_empresa(texto: Any) -> str:
+    """Empresa legible y consistente, conservando acrónimos razonables."""
+    t = _normalizar_espacios(texto)
+    if not t:
+        return ""
+    key = t.upper().replace(".", ".")
+    key_simple = re.sub(r"\s+", " ", key).strip()
+    if key_simple in EMPRESA_MAP:
+        return EMPRESA_MAP[key_simple]
+
+    palabras = []
+    for palabra in t.split(" "):
+        limpia = palabra.strip()
+        up = limpia.upper().strip()
+        if up in EMPRESA_MAP:
+            palabras.append(EMPRESA_MAP[up])
+        elif up in ACRONIMOS or len(up) <= 3 and up.isalpha():
+            palabras.append(up)
+        elif up == "SAC":
+            palabras.append("S.A.C.")
+        elif up == "SA" or up == "S.A":
+            palabras.append("S.A.")
+        else:
+            palabras.append(limpia[:1].upper() + limpia[1:].lower())
+    return " ".join(palabras)
+
+
+def _corregir_texto_basico(texto: Any) -> str:
+    """Corrección simple sin IA: espacios, abreviaturas típicas y mayúsculas excesivas."""
+    t = _safe_text(texto)
+    if not t:
+        return ""
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"[ \t]+", " ", t)
+
+    # Correcciones comunes.
+    reemplazos = {
+        r"\bhseq\b": "HSE&Q",
+        r"\bhse&q\b": "HSE&Q",
+        r"\bhsq\b": "HSE&Q",
+        r"\bmantto\b": "mantenimiento",
+        r"\borygen\b": "Orygen",
+        r"\bpms\b": "PMS",
+        r"\bsap\b": "SAP",
+    }
+    for pat, rep in reemplazos.items():
+        t = re.sub(pat, rep, t, flags=re.IGNORECASE)
+
+    # Si una línea completa viene en mayúsculas, pasarla a formato nombre/empresa aproximado.
+    lineas = []
+    for raw in t.split("\n"):
+        line = raw.strip()
+        if not line:
+            lineas.append("")
+            continue
+        if len(line) > 3 and line.upper() == line and re.search(r"[A-ZÁÉÍÓÚÑ]", line):
+            # No tocar acrónimos cortos puros.
+            line = " ".join(
+                w if w in {"PMS", "SAP", "OT", "HSE&Q", "HSE"} else (w[:1].upper() + w[1:].lower())
+                for w in line.split(" ")
+            )
+        lineas.append(line)
+    return "\n".join(lineas).strip()
+
+
 def _replace_in_paragraph(paragraph, replacements: Dict[str, str]) -> None:
     """
     Reemplazo conservador de placeholders dentro de párrafos.
@@ -90,7 +210,21 @@ def _replace_all(doc: Document, replacements: Dict[str, str]) -> None:
 
 
 def _set_cell_text(cell, text: str) -> None:
-    cell.text = _safe_text(text)
+    """Escribe texto conservando, en lo posible, el estilo del primer run de la celda."""
+    value = _safe_text(text)
+    if cell.paragraphs:
+        p = cell.paragraphs[0]
+        if p.runs:
+            p.runs[0].text = value
+            for run in p.runs[1:]:
+                run.text = ""
+        else:
+            p.add_run(value)
+        for extra_p in cell.paragraphs[1:]:
+            for run in extra_p.runs:
+                run.text = ""
+    else:
+        cell.text = value
 
 
 def _copiar_estilo_fila(row_origen, row_destino) -> None:
@@ -137,7 +271,7 @@ def _extraer_participantes_adicionales(notas: str) -> List[Dict[str, str]]:
     participantes = []
     vistos = set()
 
-    for raw in _safe_text(notas).splitlines():
+    for raw in _corregir_texto_basico(notas).splitlines():
         line = raw.strip(" -*\t")
         if not line:
             continue
@@ -183,7 +317,7 @@ def _estado_simple(estado: str) -> str:
 
 
 def _armar_observaciones(payload: Dict[str, Any]) -> str:
-    notas = _safe_text(payload.get("notas"))
+    notas = _corregir_texto_basico(payload.get("notas"))
     empresas = payload.get("empresas") or []
     faltantes = payload.get("faltantes") or []
 
@@ -255,14 +389,14 @@ def _armar_acciones(payload: Dict[str, Any]) -> List[Dict[str, str]]:
     ]
 
     for e in observadas[:5]:
-        empresa = _safe_text(e.get("empresa"))
+        empresa = _formato_empresa(e.get("empresa"))
         generadas.append({
             "accion": f"Regularizar las observaciones identificadas en el programa PMS presentado por {empresa}.",
             "responsable": empresa,
         })
 
     for e in sin_archivo[:3]:
-        empresa = _safe_text(e.get("empresa"))
+        empresa = _formato_empresa(e.get("empresa"))
         generadas.append({
             "accion": f"Completar la carga del archivo de programa semanal correspondiente a {empresa}.",
             "responsable": empresa,
@@ -270,7 +404,7 @@ def _armar_acciones(payload: Dict[str, Any]) -> List[Dict[str, str]]:
 
     faltantes = payload.get("faltantes") or []
     for empresa in faltantes[:5]:
-        empresa = _safe_text(empresa)
+        empresa = _formato_empresa(empresa)
         if empresa and not any(a.get("responsable", "").upper() == empresa.upper() for a in generadas):
             generadas.append({
                 "accion": f"Coordinar con {empresa} la carga o regularización de su programa semanal.",
@@ -298,8 +432,21 @@ def generar_acta_interferencias(payload: Dict[str, Any]) -> Dict[str, str]:
         fecha = datetime.now().strftime("%d.%m.%Y")
 
     central = _safe_text(payload.get("central") or payload.get("central_label"))
+    if normalizar := central.upper().replace(" ", ""):
+        if "SANTAROSA" in normalizar:
+            central = "C. T. Santa Rosa"
+        elif "VENTANILLA" in normalizar:
+            central = "C. C. Ventanilla"
+        else:
+            central = _formato_empresa(central)
     observaciones = _armar_observaciones(payload)
-    acciones = _armar_acciones(payload)
+    acciones = [
+        {
+            "accion": _corregir_texto_basico(a.get("accion", "")),
+            "responsable": _formato_empresa(a.get("responsable", "")),
+        }
+        for a in _armar_acciones(payload)
+    ]
 
     replacements = {
         "[[FECHA_REUNION]]": fecha,
@@ -309,6 +456,11 @@ def generar_acta_interferencias(payload: Dict[str, Any]) -> Dict[str, str]:
         "[[RESPONSABLE_01]]": acciones[0]["responsable"] if len(acciones) > 0 else "",
         "[[ACCION_02]]": acciones[1]["accion"] if len(acciones) > 1 else "",
         "[[RESPONSABLE_02]]": acciones[1]["responsable"] if len(acciones) > 1 else "",
+        # Compatibilidad con plantillas antiguas que todavía traen valores fijos.
+        "17.06.2026": fecha,
+        "17/06/2026": fecha,
+        "CT SANTA ROSA": central,
+        "CT VENTANILLA": central,
     }
     _replace_all(doc, replacements)
 
@@ -325,7 +477,7 @@ def generar_acta_interferencias(payload: Dict[str, Any]) -> Dict[str, str]:
         key = (nombre.upper(), empresa.upper())
         if key in vistos:
             continue
-        participantes.append({"nombre": nombre, "contrato": contrato, "empresa": empresa})
+        participantes.append({"nombre": _formato_nombre(nombre), "contrato": contrato, "empresa": _formato_empresa(empresa)})
         vistos.add(key)
 
     for p in payload.get("participantes_adicionales") or []:
@@ -337,7 +489,7 @@ def generar_acta_interferencias(payload: Dict[str, Any]) -> Dict[str, str]:
         key = (nombre.upper(), empresa.upper())
         if key in vistos:
             continue
-        participantes.append({"nombre": nombre, "contrato": contrato, "empresa": empresa})
+        participantes.append({"nombre": _formato_nombre(nombre), "contrato": contrato, "empresa": _formato_empresa(empresa)})
         vistos.add(key)
 
     for p in _extraer_participantes_adicionales(payload.get("notas") or ""):
@@ -355,9 +507,9 @@ def generar_acta_interferencias(payload: Dict[str, Any]) -> Dict[str, str]:
         for idx, p in enumerate(participantes, start=1):
             row = tabla_part.rows[idx]
             _set_cell_text(row.cells[0], str(idx))
-            _set_cell_text(row.cells[1], p.get("nombre", ""))
+            _set_cell_text(row.cells[1], _formato_nombre(p.get("nombre", "")))
             _set_cell_text(row.cells[2], p.get("contrato", ""))
-            _set_cell_text(row.cells[3], p.get("empresa", ""))
+            _set_cell_text(row.cells[3], _formato_empresa(p.get("empresa", "")))
             _set_cell_text(row.cells[4], "")
 
     # Acciones extra: tabla 2, filas 3 en adelante.
