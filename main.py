@@ -118,6 +118,7 @@ def root():
             "/validar-pms-contra-sap",
             "/control-sap/validar-ots",
             "/control-sap/actualizar-ot",
+            "/control-sap/aplicar-cambios",
         ],
     }
 
@@ -293,6 +294,15 @@ def insertar_actividades(pms_archivo_id: str, resultado: Dict[str, Any]):
 
         if "pedido" in a and a.get("pedido") and not fila.get("numero_pedido"):
             fila["numero_pedido"] = a.get("pedido")
+
+        if "cod_pm_aviso" in a:
+            fila["cod_pm_aviso"] = a.get("cod_pm_aviso")
+
+        if "cod_pm" in a and a.get("cod_pm") and not fila.get("cod_pm_aviso"):
+            fila["cod_pm_aviso"] = a.get("cod_pm")
+
+        if "aviso" in a and a.get("aviso") and not fila.get("cod_pm_aviso"):
+            fila["cod_pm_aviso"] = a.get("aviso")
 
         if "dias" in a:
             fila["dias"] = normalizar_lista(a.get("dias"))
@@ -1830,6 +1840,108 @@ async def control_sap_validar_ots(
                 os.remove(ruta)
             except Exception:
                 pass
+
+
+
+class CambioControlSap(BaseModel):
+    key: str = ""
+    actividad_id: str
+    empresa: str = ""
+    fila_excel: Any = ""
+    accion: str = ""
+    ot_original: str = ""
+    ot_final: str = ""
+    plan_pm_final: str = ""
+    cod_pm_final: str = ""
+    pedido_final: str = ""
+    aviso: str = ""
+
+
+class AplicarCambiosControlSapRequest(BaseModel):
+    password: str
+    cambios: List[CambioControlSap] = []
+
+
+def _valor_actualizable_control_sap(valor: Any) -> str:
+    """Normaliza valores de pantalla antes de grabarlos en pms_actividades."""
+    if valor is None:
+        return ""
+    texto = str(valor).strip()
+    if texto.upper() in {"", "-", "—", "NULL", "NONE", "NAN", "NO APLICA"}:
+        return ""
+    return texto
+
+
+@app.post("/control-sap/aplicar-cambios")
+def control_sap_aplicar_cambios(req: AplicarCambiosControlSapRequest):
+    """
+    Aplica cambios preparados del Control SAP sobre pms_actividades.
+
+    Solo actualiza:
+    - ot_grafo
+    - cod_pm_aviso
+    - numero_pedido
+
+    No modifica motivo/actividad, sistema, equipo, unidad, inspector ni días.
+    """
+    _validar_password_sap(req.password)
+
+    if not req.cambios:
+        raise HTTPException(status_code=400, detail="No se recibieron cambios para aplicar.")
+
+    aplicados = []
+    omitidos = []
+
+    for cambio in req.cambios:
+        actividad_id = str(cambio.actividad_id or "").strip()
+        if not actividad_id:
+            omitidos.append({
+                "key": cambio.key,
+                "motivo": "Cambio sin actividad_id; no se puede ubicar la fila PMS.",
+            })
+            continue
+
+        cod_pm_aviso = (
+            _valor_actualizable_control_sap(cambio.cod_pm_final)
+            or _valor_actualizable_control_sap(cambio.plan_pm_final)
+            or _valor_actualizable_control_sap(cambio.aviso)
+        )
+
+        payload = {
+            "ot_grafo": _valor_actualizable_control_sap(cambio.ot_final),
+            "cod_pm_aviso": cod_pm_aviso,
+            "numero_pedido": _valor_actualizable_control_sap(cambio.pedido_final),
+        }
+
+        try:
+            resp = (
+                supabase.table("pms_actividades")
+                .update(payload)
+                .eq("id", actividad_id)
+                .execute()
+            )
+            aplicados.append({
+                "actividad_id": actividad_id,
+                "empresa": cambio.empresa,
+                "fila_excel": cambio.fila_excel,
+                "payload": payload,
+                "data": resp.data,
+            })
+        except Exception as exc:
+            omitidos.append({
+                "actividad_id": actividad_id,
+                "empresa": cambio.empresa,
+                "fila_excel": cambio.fila_excel,
+                "motivo": str(exc),
+            })
+
+    return {
+        "ok": True,
+        "aplicados": len(aplicados),
+        "omitidos": len(omitidos),
+        "detalle_aplicados": aplicados,
+        "detalle_omitidos": omitidos,
+    }
 
 
 class ActualizarOtControlSapRequest(BaseModel):
