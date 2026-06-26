@@ -176,18 +176,23 @@ def clasificar_estado_aviso(estado_aviso: Any, estado_sistema: Any = None, estad
     eu = sin_tildes(limpiar_texto(estado_usuario)).upper()
     combo = f"{ea} {es} {eu}"
 
+    # SAP suele exportar códigos de status del aviso.
+    # MEAB = aviso abierto, METR = en tratamiento, MECE = cerrado.
+    # A veces vienen combinados: "MECE ORAS PTBO".
+    tokens = set(re.findall(r"[A-Z0-9]+", combo))
+
+    if "MECE" in tokens or "CERR" in combo or "CTEC" in combo or "CERRADO" in combo:
+        return "CERRADO"
     if "BORR" in combo or "MARCADO" in combo:
         return "BORRADO"
-    if "CERR" in combo or "CTEC" in combo or "CERRADO" in combo:
-        return "CERRADO"
     if "CONCL" in combo or "COMPLET" in combo:
         return "CONCLUIDO"
+    if "METR" in tokens or "TRAT" in combo or "PROCES" in combo or "EN CURSO" in combo:
+        return "EN_TRATAMIENTO"
+    if "MEAB" in tokens or "ABIE" in combo or "ABIERTO" in combo or "PEND" in combo or "NUEVO" in combo:
+        return "ABIERTO"
     if "LIBR" in combo or "LIBERADO" in combo:
         return "LIBERADO"
-    if "ABIE" in combo or "ABIERTO" in combo or "PEND" in combo or "NUEVO" in combo:
-        return "ABIERTO"
-    if "TRAT" in combo or "PROCES" in combo or "EN CURSO" in combo:
-        return "EN_TRATAMIENTO"
     return "DESCONOCIDO"
 
 
