@@ -1858,8 +1858,8 @@ class CambioControlSap(BaseModel):
 
 
 class AplicarCambiosControlSapRequest(BaseModel):
-    password: str
     cambios: List[CambioControlSap] = []
+    password: str = ""
 
 
 def _valor_actualizable_control_sap(valor: Any) -> str:
@@ -1884,8 +1884,8 @@ def control_sap_aplicar_cambios(req: AplicarCambiosControlSapRequest):
 
     No modifica motivo/actividad, sistema, equipo, unidad, inspector ni días.
     """
-    _validar_password_sap(req.password)
-
+    # No requiere clave: esta acción solo aplica cambios ya preparados por la validación.
+    # La clave se reserva para cargar/actualizar maestros SAP.
     if not req.cambios:
         raise HTTPException(status_code=400, detail="No se recibieron cambios para aplicar.")
 
@@ -1970,4 +1970,5 @@ def control_sap_actualizar_ot(req: ActualizarOtControlSapRequest):
         return {"ok": True, "actividad_id": req.actividad_id, "ot_nueva": ot, "data": resp.data}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"No se pudo actualizar la OT: {exc}")
+
 
