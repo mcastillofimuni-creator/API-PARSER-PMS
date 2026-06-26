@@ -1183,6 +1183,314 @@ def _sugerir_ot_por_texto(actividad: Dict[str, Any], registros: List[Dict[str, A
     }
 
 
+def _leer_tabla_supabase_completa(tabla: str, columnas: str = "*", lote: int = 1000) -> List[Dict[str, Any]]:
+    """Lee una tabla completa en lotes para evitar el límite por defecto de Supabase."""
+    filas: List[Dict[str, Any]] = []
+    inicio = 0
+    while True:
+        resp = (
+            supabase.table(tabla)
+            .select(columnas)
+            .range(inicio, inicio + lote - 1)
+            .execute()
+        )
+        data = resp.data or []
+        filas.extend(data)
+        if len(data) < lote:
+            break
+        inicio += lote
+    return filas
+
+
+def _validar_control_sap_con_registros(
+    *,
+    semana: str,
+    central: str,
+    registros_ordenes: List[Dict[str, Any]],
+    registros_avisos: Optional[List[Dict[str, Any]]] = None,
+    archivo_ordenes: str = "Maestro SAP OTs cargado",
+    archivo_avisos: str = "Maestro SAP Avisos cargado",
+    resumen_ordenes: Optional[Dict[str, Any]] = None,
+    resumen_avisos: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Cruza PMS contra listas ya parseadas o leídas desde Supabase. No modifica el PMS."""
+    registros_avisos = registros_avisos or []
+    central_req = normalizar_central_backend(central)
+    por_ot, por_aviso, registros_sap = _fusionar_indices_sap(registros_ordenes, registros_avisos)
+
+    actividades_resp = (
+        supabase.table("pms_actividades")
+        .select("*")
+        .eq("semana", semana)
+        .execute()
+    )
+    actividades = actividades_resp.data or []
+    actividades = [
+        a for a in actividades
+        if not central_req or normalizar_central_backend(a.get("central")) == central_req
+    ]
+
+    filas: List[Dict[str, Any]] = []
+    resumen = {
+        "actividades_revisadas": len(actividades),
+        "ots_ok": 0,
+        "avisos_como_ot": 0,
+        "no_encontradas": 0,
+        "sin_numero": 0,
+        "sugeridas": 0,
+        "estado_no_operativo": 0,
+        "avisos_sin_ot": 0,
+    }
+
+    def _fila_base(act: Dict[str, Any], numero: str, aviso_detectado: str, pedido_detectado_base: str, campo_origen: str) -> Dict[str, Any]:
+        return {
+            "actividad_id": act.get("id"),
+            "pms_archivo_id": act.get("pms_archivo_id"),
+            "empresa": act.get("proveedor"),
+            "fila_excel": act.get("fila_excel"),
+            "numero_pms": numero,
+            "aviso_pms": aviso_detectado,
+            "pedido_pms": pedido_detectado_base,
+            "pedido_detectado": numero if _es_pedido_sap(numero) else pedido_detectado_base,
+            "campo_origen": campo_origen,
+            "actividad_pms": act.get("actividad"),
+            "unidad_pms": act.get("unidad"),
+            "sistema_pms": act.get("sistema"),
+            "equipo_pms": act.get("equipo"),
+        }
+
+    def _completar_con_row_sap(base: Dict[str, Any], row: Dict[str, Any], estado_fila: str, obs: str, score: int = 100) -> Dict[str, Any]:
+        numero = base.get("numero_pms") or ""
+        return {
+            **base,
+            "estado": estado_fila,
+            "observacion": obs,
+            "ot_sap": row.get("numero_ot") or "",
+            "aviso_sap": row.get("numero_aviso") or "",
+            "cod_pm_sap": _cod_pm_o_aviso_sugerido(row),
+            "plan_pm_sap": _extraer_plan_pm_sap(row),
+            "pedido_sap": _extraer_pedido_sap(row),
+            "pedido_sugerido": (numero if _es_pedido_sap(numero) else base.get("pedido_detectado") or "") or _extraer_pedido_sap(row),
+            "cod_pm_sugerido": _cod_pm_o_aviso_sugerido(row),
+            "descripcion_sap": _descripcion_sap_referencial(row),
+            "ot_sugerida": row.get("numero_ot") or "",
+            "descripcion_sugerida": _descripcion_sap_referencial(row),
+            "score_sugerencia": score,
+            "estado_sap": row.get("estado_control") or "",
+        }
+
+    for act in actividades:
+        raw = act.get("datos_originales") or {}
+        ot_valor = act.get("ot_grafo") or buscar_valor_en_raw(raw, [
+            "N°OT / GRAFO", "N°OT / PEDIDO", "N° OT", "OT", "ORDEN", "NºOT / GRAFO", "N°OT"
+        ])
+        aviso_valor = act.get("cod_pm_aviso") or buscar_valor_en_raw(raw, [
+            "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
+        ])
+        pedido_valor = act.get("numero_pedido") or buscar_valor_en_raw(raw, [
+            "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido", "Numero de pedido"
+        ])
+
+        aviso_detectado = ", ".join(extraer_numeros_sap(aviso_valor))
+        pedido_detectado_base = ", ".join([n for n in extraer_numeros_sap(pedido_valor) if _es_pedido_sap(n)])
+
+        numeros = extraer_numeros_sap(ot_valor)
+        campo_origen = "OT/Grafo"
+        if not numeros:
+            numeros = extraer_numeros_sap(aviso_valor)
+            campo_origen = "Aviso/COD PM"
+
+        if not numeros:
+            sugerida = _sugerir_ot_por_texto(act, registros_sap, central_req)
+            if sugerida.get("numero_ot"):
+                resumen["sugeridas"] += 1
+            else:
+                resumen["sin_numero"] += 1
+            base = _fila_base(act, "", aviso_detectado, pedido_detectado_base, "Sin número")
+            filas.append({
+                **base,
+                "estado": "SIN_NUMERO",
+                "observacion": "La actividad no tiene OT ni Aviso identificable.",
+                "ot_sap": "",
+                "aviso_sap": sugerida.get("numero_aviso") or "",
+                "cod_pm_sap": sugerida.get("cod_pm_sugerido") or sugerida.get("plan_pm_sap") or sugerida.get("numero_aviso") or "",
+                "plan_pm_sap": sugerida.get("plan_pm_sap") or "",
+                "pedido_sap": sugerida.get("pedido_sap") or "",
+                "pedido_sugerido": pedido_detectado_base or sugerida.get("pedido_sap") or "",
+                "cod_pm_sugerido": sugerida.get("cod_pm_sugerido") or sugerida.get("numero_aviso") or "",
+                "descripcion_sap": "",
+                "ot_sugerida": sugerida.get("numero_ot") or "",
+                "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
+                "score_sugerencia": sugerida.get("score") or 0,
+                "estado_sap": sugerida.get("estado_control") or "",
+            })
+            continue
+
+        for numero in numeros:
+            base = _fila_base(act, numero, aviso_detectado, pedido_detectado_base, campo_origen)
+            row_ot = por_ot.get(numero)
+            row_aviso = por_aviso.get(numero)
+
+            if row_ot:
+                estado = str(row_ot.get("estado_control") or "")
+                if estado in {"CERRADO_TEC", "BORRADO", "COMPLETADO_EMPRESA"}:
+                    resumen["estado_no_operativo"] += 1
+                    estado_fila = "ESTADO_NO_OPERATIVO"
+                    obs = f"La OT existe en SAP, pero figura con estado {estado}."
+                else:
+                    resumen["ots_ok"] += 1
+                    estado_fila = "OK"
+                    obs = "La OT informada existe en SAP."
+                filas.append(_completar_con_row_sap(base, row_ot, estado_fila, obs, 100))
+                continue
+
+            if row_aviso:
+                if _es_aviso_no_operativo(row_aviso):
+                    resumen["estado_no_operativo"] += 1
+                    estado_txt = _estado_aviso_legible(row_aviso)
+                    fila = _completar_con_row_sap(
+                        base,
+                        row_aviso,
+                        "AVISO_NO_OPERATIVO",
+                        f"El número informado corresponde a un Aviso SAP, pero figura no operativo/cerrado: {estado_txt}.",
+                        0,
+                    )
+                    fila["aviso_sap"] = row_aviso.get("numero_aviso") or numero
+                    fila["cod_pm_sugerido"] = ""
+                    fila["ot_sugerida"] = ""
+                    fila["plan_pm_sap"] = ""
+                    filas.append(fila)
+                    continue
+
+                sugerida_ot = row_aviso.get("numero_ot") or ""
+                if sugerida_ot:
+                    resumen["avisos_como_ot"] += 1
+                    obs = "El número informado no existe como OT, pero sí existe como Aviso SAP con OT asociada."
+                else:
+                    resumen["avisos_sin_ot"] += 1
+                    obs = "El número informado corresponde a un Aviso SAP, pero no tiene OT asociada en el maestro de avisos."
+                fila = _completar_con_row_sap(
+                    base,
+                    row_aviso,
+                    "AVISO_COMO_OT" if sugerida_ot else "AVISO_SIN_OT",
+                    obs,
+                    90 if sugerida_ot else 70,
+                )
+                fila["aviso_sap"] = row_aviso.get("numero_aviso") or numero
+                fila["cod_pm_sugerido"] = row_aviso.get("numero_aviso") or numero
+                fila["ot_sugerida"] = sugerida_ot
+                filas.append(fila)
+                continue
+
+            sugerida = _sugerir_ot_por_texto(act, registros_sap, central_req)
+            if sugerida.get("numero_ot"):
+                resumen["sugeridas"] += 1
+            else:
+                resumen["no_encontradas"] += 1
+            filas.append({
+                **base,
+                "estado": "NO_ENCONTRADA",
+                "observacion": "El número informado no fue encontrado como OT ni como Aviso en los maestros SAP cargados.",
+                "ot_sap": "",
+                "aviso_sap": sugerida.get("numero_aviso") or "",
+                "cod_pm_sap": sugerida.get("cod_pm_sugerido") or sugerida.get("plan_pm_sap") or sugerida.get("numero_aviso") or "",
+                "plan_pm_sap": sugerida.get("plan_pm_sap") or "",
+                "pedido_sap": sugerida.get("pedido_sap") or "",
+                "pedido_sugerido": (numero if _es_pedido_sap(numero) else pedido_detectado_base) or sugerida.get("pedido_sap") or "",
+                "cod_pm_sugerido": sugerida.get("cod_pm_sugerido") or sugerida.get("numero_aviso") or "",
+                "descripcion_sap": "",
+                "ot_sugerida": sugerida.get("numero_ot") or "",
+                "descripcion_sugerida": sugerida.get("descripcion_ot") or "",
+                "score_sugerencia": sugerida.get("score") or 0,
+                "estado_sap": sugerida.get("estado_control") or "",
+            })
+
+    return {
+        "ok": True,
+        "semana": semana,
+        "central": central_req,
+        "archivo_fuente": archivo_ordenes,
+        "archivo_ordenes": archivo_ordenes,
+        "archivo_avisos": archivo_avisos,
+        "sap": resumen_ordenes or {"registros_ordenes": len(registros_ordenes)},
+        "sap_avisos": resumen_avisos or {"registros_avisos": len(registros_avisos)},
+        "resumen": resumen,
+        "filas": filas,
+    }
+
+
+@app.post("/control-sap/validar-maestros")
+def control_sap_validar_maestros(req: ValidarSapRequest):
+    """Valida automáticamente contra los maestros SAP persistidos en Supabase."""
+    try:
+        registros_ordenes = _leer_tabla_supabase_completa("sap_ordenes_avisos")
+        registros_avisos = _leer_tabla_supabase_completa("sap_notificaciones")
+        if not registros_ordenes and not registros_avisos:
+            raise HTTPException(status_code=400, detail="No hay maestros SAP cargados. Carga primero OTs y/o Avisos en Administración SAP.")
+        return _validar_control_sap_con_registros(
+            semana=req.semana,
+            central=req.central,
+            registros_ordenes=registros_ordenes,
+            registros_avisos=registros_avisos,
+            archivo_ordenes="Maestro OTs Supabase",
+            archivo_avisos="Maestro Avisos Supabase",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo validar con maestros SAP: {exc}")
+
+
+@app.post("/control-sap/cargar-maestro-ots")
+async def control_sap_cargar_maestro_ots(password: str = Form(...), file: UploadFile = File(...)):
+    """Carga maestro de OTs en sap_ordenes_avisos. Requiere clave admin."""
+    _validar_password_sap(password)
+    return await cargar_maestro_sap(file)
+
+
+@app.post("/control-sap/cargar-maestro-avisos")
+async def control_sap_cargar_maestro_avisos(password: str = Form(...), file: UploadFile = File(...)):
+    """Carga maestro de Avisos/Notificaciones en sap_notificaciones. Requiere clave admin."""
+    _validar_password_sap(password)
+    nombre = file.filename or "avisos_sap.xlsx"
+    suffix = Path(nombre).suffix or ".xlsx"
+    ruta_local = None
+    try:
+        contenido = await file.read()
+        if not contenido:
+            raise HTTPException(status_code=400, detail="El archivo de avisos está vacío.")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(contenido)
+        tmp.flush()
+        tmp.close()
+        ruta_local = tmp.name
+
+        resultado = parsear_avisos_sap(ruta_local, archivo_fuente=nombre)
+        registros = resultado.get("registros") or []
+        if not registros:
+            raise HTTPException(status_code=400, detail="No se encontraron avisos válidos en el Excel SAP.")
+
+        try:
+            supabase.table("sap_notificaciones").delete().gte(
+                "fecha_carga", "1900-01-01T00:00:00+00:00"
+            ).execute()
+        except Exception:
+            supabase.table("sap_notificaciones").delete().neq("numero_aviso", "__NO_EXISTE__").execute()
+
+        insertar_en_lotes("sap_notificaciones", registros, lote=300)
+        return {"ok": True, "archivo_fuente": nombre, **(resultado.get("resumen") or {})}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo cargar el maestro de avisos SAP: {exc}")
+    finally:
+        if ruta_local:
+            try:
+                os.remove(ruta_local)
+            except Exception:
+                pass
+
+
 @app.post("/control-sap/validar-ots")
 async def control_sap_validar_ots(
     password: str = Form(...),
