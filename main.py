@@ -598,6 +598,72 @@ def buscar_valor_en_raw(raw: Any, posibles_claves: List[str]) -> str:
     return ""
 
 
+
+
+# ─── Sanitizado de maestros SAP para evitar errores por columnas nuevas en Supabase ───
+# Supabase/PostgREST falla si intentamos insertar una clave que no existe como columna.
+# Por eso guardamos campos variables/nuevos dentro de raw_data y solo insertamos columnas estables.
+COLUMNAS_SAP_ORDENES = {
+    "numero_ot", "descripcion_ot", "numero_aviso", "descripcion_aviso",
+    "clase_orden", "tipo_mant_sap", "central", "centro_puesto",
+    "objeto_tecnico", "descripcion_objeto_tecnico", "equipo", "ubicacion_tecnica",
+    "estado_orden", "descripcion_estado_orden", "estado_usuario", "estado_sistema",
+    "estado_control", "inicio_planificado", "fin_programado", "fecha_creacion",
+    "puesto_trabajo_principal", "prioridad", "archivo_fuente", "fila_sap", "raw_data",
+}
+
+COLUMNAS_SAP_AVISOS = {
+    "numero_aviso", "descripcion_aviso", "numero_ot_asociada", "descripcion_ot_asociada",
+    "clase_aviso", "tipo_aviso", "prioridad", "central", "centro_puesto",
+    "objeto_tecnico", "descripcion_objeto_tecnico", "equipo", "ubicacion_tecnica",
+    "estado_aviso", "estado_usuario", "estado_sistema", "estado_control",
+    "fecha_aviso", "fecha_creacion", "inicio_deseado", "fin_deseado",
+    "puesto_trabajo_principal", "responsable", "archivo_fuente", "fila_sap", "raw_data",
+}
+
+
+def _inyectar_extras_en_raw(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Conserva campos útiles aunque no existan como columnas físicas."""
+    raw = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}
+    raw = dict(raw)
+
+    extras = {
+        "plan_pm_extraido": row.get("plan_pm") or row.get("numero_plan_mantenimiento"),
+        "plan_mantenimiento_extraido": row.get("plan_mantenimiento"),
+        "descripcion_plan_mantenimiento_extraida": row.get("descripcion_plan_mantenimiento"),
+        "hoja_fuente_extraida": row.get("hoja_fuente"),
+        "pedido_extraido": row.get("pedido") or row.get("numero_pedido"),
+    }
+    for k, v in extras.items():
+        if v not in (None, ""):
+            raw[k] = hacer_json_serializable(v)
+
+    nuevo = dict(row)
+    nuevo["raw_data"] = hacer_json_serializable(raw)
+    return nuevo
+
+
+def limpiar_registros_maestro_ots(registros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    limpios = []
+    for row in registros or []:
+        if not isinstance(row, dict):
+            continue
+        row = _inyectar_extras_en_raw(row)
+        limpio = {k: hacer_json_serializable(v) for k, v in row.items() if k in COLUMNAS_SAP_ORDENES}
+        limpios.append(limpio)
+    return limpios
+
+
+def limpiar_registros_maestro_avisos(registros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    limpios = []
+    for row in registros or []:
+        if not isinstance(row, dict):
+            continue
+        row = _inyectar_extras_en_raw(row)
+        limpio = {k: hacer_json_serializable(v) for k, v in row.items() if k in COLUMNAS_SAP_AVISOS}
+        limpios.append(limpio)
+    return limpios
+
 def insertar_en_lotes(tabla: str, filas: List[Dict[str, Any]], lote: int = 400):
     for i in range(0, len(filas), lote):
         supabase.table(tabla).insert(filas[i:i + lote]).execute()
@@ -632,6 +698,7 @@ async def cargar_maestro_sap(file: UploadFile = File(...)):
 
         resultado = parsear_ordenes_sap(ruta_local, archivo_fuente=nombre)
         registros = resultado.get("registros") or []
+        registros = limpiar_registros_maestro_ots(registros)
 
         if not registros:
             raise HTTPException(status_code=400, detail="No se encontraron OT/Avisos válidos en el Excel SAP.")
@@ -1041,6 +1108,7 @@ def _extraer_pedido_sap(row: Optional[Dict[str, Any]]) -> str:
         row.get("pedido"),
         row.get("pedido_sap"),
         _buscar_en_raw_sap(row, [
+            "pedido_extraido", "numero_pedido_extraido",
             "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido",
             "Numero de pedido", "Orden de compra", "OC", "Documento de compras",
             "Pedido de compras", "Sol. pedido", "Solicitud de pedido"
@@ -1068,6 +1136,7 @@ def _extraer_plan_pm_sap(row: Optional[Dict[str, Any]]) -> str:
         row.get("plan_mantenimiento"),
         row.get("descripcion_plan_mantenimiento"),
         _buscar_en_raw_sap(row, [
+            "plan_pm_extraido", "plan_mantenimiento_extraido", "descripcion_plan_mantenimiento_extraida",
             "Plan de mantenimiento preventivo",
             "Plan de mantenimiento", "Plan mant.", "Plan mant", "Plan mantto",
             "Plan mantenimiento", "Plan de mantto", "Plan PM", "Código PM",
@@ -1288,6 +1357,7 @@ def _validar_control_sap_con_registros(
             "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
         ])
         pedido_valor = act.get("numero_pedido") or buscar_valor_en_raw(raw, [
+            "pedido_extraido", "numero_pedido_extraido",
             "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido", "Numero de pedido"
         ])
 
@@ -1467,6 +1537,7 @@ async def control_sap_cargar_maestro_avisos(password: str = Form(...), file: Upl
 
         resultado = parsear_avisos_sap(ruta_local, archivo_fuente=nombre)
         registros = resultado.get("registros") or []
+        registros = limpiar_registros_maestro_avisos(registros)
         if not registros:
             raise HTTPException(status_code=400, detail="No se encontraron avisos válidos en el Excel SAP.")
 
@@ -1616,7 +1687,8 @@ async def control_sap_validar_ots(
                 "COD PM / AVISO", "COD PM / AVISO GEMA", "AVISO", "COD MP / AVISO GEMA", "COD MP / AVISO"
             ])
             pedido_valor = act.get("numero_pedido") or buscar_valor_en_raw(raw, [
-                "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido", "Numero de pedido"
+                "pedido_extraido", "numero_pedido_extraido",
+            "N° Pedido", "Nº Pedido", "N Pedido", "Pedido", "Número de pedido", "Numero de pedido"
             ])
 
             aviso_detectado = ", ".join(extraer_numeros_sap(aviso_valor))
