@@ -950,6 +950,26 @@ def _normalizar_aviso_para_control(registro_aviso: Dict[str, Any]) -> Dict[str, 
     }
 
 
+def _es_aviso_no_operativo(row: Optional[Dict[str, Any]]) -> bool:
+    """Avisos cerrados/no operativos no deben usarse como sugerencia de programación."""
+    if not row:
+        return False
+    estado = str(row.get("estado_control") or "").upper().strip()
+    return estado in {"CERRADO", "CONCLUIDO", "BORRADO", "CERRADO_TEC", "COMPLETADO_EMPRESA"}
+
+
+def _estado_aviso_legible(row: Optional[Dict[str, Any]]) -> str:
+    if not row:
+        return ""
+    estado = str(row.get("estado_control") or "").strip()
+    raw = row.get("raw_data") or {}
+    bruto = buscar_valor_en_raw(raw, [
+        "Estado del sistema", "Estado sistema", "Status sistema",
+        "Estado de usuario", "Estado del aviso", "Estado"
+    ])
+    return f"{estado} ({bruto})" if estado and bruto else (estado or bruto or "")
+
+
 def _fusionar_indices_sap(registros_ordenes: List[Dict[str, Any]], registros_avisos: List[Dict[str, Any]]):
     """
     Arma índices por OT y por Aviso usando ambos Excel.
@@ -969,7 +989,10 @@ def _fusionar_indices_sap(registros_ordenes: List[Dict[str, Any]], registros_avi
         if av:
             por_aviso[av] = row
 
-    registros_para_sugerencia = registros_ordenes + [r for r in registros_avisos_norm if r.get("numero_ot")]
+    registros_para_sugerencia = registros_ordenes + [
+        r for r in registros_avisos_norm
+        if r.get("numero_ot") and not _es_aviso_no_operativo(r)
+    ]
     return por_ot, por_aviso, registros_para_sugerencia
 
 
@@ -1342,6 +1365,25 @@ async def control_sap_validar_ots(
                     continue
 
                 if row_aviso:
+                    # Si el aviso está cerrado/no operativo, se muestra como observación,
+                    # pero no se toma como COD PM/AVISO sugerido para programación.
+                    if _es_aviso_no_operativo(row_aviso):
+                        resumen["estado_no_operativo"] += 1
+                        estado_txt = _estado_aviso_legible(row_aviso)
+                        fila = _completar_con_row_sap(
+                            base,
+                            row_aviso,
+                            "AVISO_NO_OPERATIVO",
+                            f"El número informado corresponde a un Aviso SAP, pero figura no operativo/cerrado: {estado_txt}.",
+                            0,
+                        )
+                        fila["aviso_sap"] = row_aviso.get("numero_aviso") or numero
+                        fila["cod_pm_sugerido"] = ""
+                        fila["ot_sugerida"] = ""
+                        fila["plan_pm_sap"] = ""
+                        filas.append(fila)
+                        continue
+
                     sugerida_ot = row_aviso.get("numero_ot") or ""
                     if sugerida_ot:
                         resumen["avisos_como_ot"] += 1
