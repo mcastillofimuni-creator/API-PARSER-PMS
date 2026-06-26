@@ -1670,12 +1670,33 @@ def escribir_fila_desde_original(ws, fila_destino, actividad, archivo_info):
     )
 
     # Si alguna columna principal vino vacía, rellenar con campos planos.
-    ws[f"{COLS_FALLBACK['ot_grafo']}{fila_destino}"] = valor_original_o_fallback(
-        actividad,
-        columnas_originales,
-        COLS_FALLBACK["ot_grafo"],
-        "ot_grafo",
+    #
+    # IMPORTANTE:
+    # OT/Grafo, COD PM/AVISO y Pedido pueden haber sido corregidos desde Control SAP.
+    # Por eso estos tres campos deben priorizar pms_actividades sobre el Excel original.
+    # El motivo/actividad NO se toca.
+    ws[f"{COLS_FALLBACK['ot_grafo']}{fila_destino}"] = convertir_valor_excel(
+        actividad.get("ot_grafo") if actividad.get("ot_grafo") is not None else ""
     )
+
+    cod_pm_aviso_aplicado = obtener_valor(
+        actividad,
+        "cod_pm_aviso",
+        "cod_pm",
+        "aviso",
+        default="",
+    )
+    if cod_pm_aviso_aplicado not in [None, "", "NULL", "None", "nan", [], {}]:
+        ws[f"{COLS_FALLBACK['cod_pm_aviso']}{fila_destino}"] = convertir_valor_excel(cod_pm_aviso_aplicado)
+
+    pedido_aplicado = obtener_valor(
+        actividad,
+        "numero_pedido",
+        "pedido",
+        default="",
+    )
+    if pedido_aplicado not in [None, "", "NULL", "None", "nan", [], {}]:
+        ws[f"{COLS_FALLBACK['pedido']}{fila_destino}"] = convertir_valor_excel(pedido_aplicado)
 
     ws[f"{COLS_FALLBACK['unidad']}{fila_destino}"] = valor_original_o_fallback(
         actividad,
